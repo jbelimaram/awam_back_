@@ -1,0 +1,10 @@
+venv/ 
+.env 
+__pycache__/ 
+*.pyc 
+.pytest_cache/ 
+.mypy_cache/ 
+*.db 
+*.sqlite3 
+celerybeat-schedule.* 
+iris.parquet 
