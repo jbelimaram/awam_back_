@@ -35,8 +35,13 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 
 def create_access_token(user_id: int) -> str:
-    expire = datetime.now(timezone.utc) + timedelta(days=JWT_EXPIRATION_DAYS)
-    payload = {"sub": str(user_id), "exp": expire}
+    now = datetime.now(timezone.utc)
+    expire = now + timedelta(days=JWT_EXPIRATION_DAYS)
+    payload = {
+        "sub": str(user_id),
+        "iat": now,      # ⬅️ AJOUT : date de création du token
+        "exp": expire,
+    }
     return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
 
 
@@ -59,6 +64,16 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     user = db.query(User).filter(User.id == int(payload["sub"])).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Utilisateur introuvable.")
+
+    # ⬇️ AJOUT : rejette le token s'il a été émis avant le dernier changement de mot de passe
+    if user.password_changed_at is not None:
+        token_issued_at = payload.get("iat")
+        if token_issued_at is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session invalide ou expirée.")
+
+        token_issued_at_dt = datetime.fromtimestamp(token_issued_at, tz=timezone.utc)
+        if token_issued_at_dt < user.password_changed_at:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expirée, veuillez vous reconnecter.")
 
     return user
 

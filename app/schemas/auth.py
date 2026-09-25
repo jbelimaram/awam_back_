@@ -1,4 +1,5 @@
 import re
+from datetime import datetime
 from typing import Optional
 from pydantic import BaseModel, EmailStr, field_validator, model_validator
 
@@ -82,3 +83,7 @@ class ResetPasswordRequest(BaseModel):
         if self.password != self.confirmPassword:
             raise ValueError("Les mots de passe ne correspondent pas.")
         return self
+
+
+class ResetTokenExpiryResponse(BaseModel):
+    expires_at: datetime

@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 import secrets
+import hashlib
 from datetime import datetime, timedelta, timezone
 from app.services.email_service import send_reset_password_email
 
@@ -21,6 +22,7 @@ from app.schemas.auth import (
     UserResponse,
     ForgotPasswordRequest,
     ResetPasswordRequest,
+    ResetTokenExpiryResponse,
 )
 from app.services.google_oauth import oauth, get_or_create_user, generate_unique_username
 
@@ -38,6 +40,12 @@ def set_auth_cookie(response: Response, user_id: int) -> None:
         max_age=60 * 60 * 24,
         path="/",
     )
+
+
+def _hash_reset_token(token: str) -> str:
+    """Hash le token de réinitialisation avant stockage en base,
+    pour qu'un vol de la base ne permette jamais de récupérer le vrai token."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 @router.post("/register", response_model=AuthResponse)
@@ -124,11 +132,11 @@ async def forgot_password(payload: ForgotPasswordRequest, db: Session = Depends(
 
     if user:
         token = secrets.token_urlsafe(32)
-        user.reset_token = token
+        user.reset_token = _hash_reset_token(token)  # ⬅️ MODIFIÉ : on stocke le hash, pas le token brut
         user.reset_token_expires = datetime.now(timezone.utc) + timedelta(minutes=5)
         db.commit()
 
-        reset_link = f"{FRONTEND_URL}/reinitialiser-mot-de-passe/{token}"
+        reset_link = f"{FRONTEND_URL}/reinitialiser-mot-de-passe/{token}"  # ⬅️ le vrai token part par email, inchangé
         send_reset_password_email(user.email, reset_link)
 
     return {"message": "Si cet e-mail existe, un lien de réinitialisation a été envoyé."}
@@ -140,9 +148,30 @@ async def logout(response: Response):
     return {"message": "Déconnecté avec succès."}
 
 
+@router.get("/reset-password/{token}/expiry", response_model=ResetTokenExpiryResponse)
+async def get_reset_token_expiry(token: str, db: Session = Depends(get_db)):
+    hashed_token = _hash_reset_token(token)
+    user = db.query(User).filter(User.reset_token == hashed_token).first()
+
+    if not user or not user.reset_token_expires:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Lien de réinitialisation invalide ou expiré.",
+        )
+
+    if user.reset_token_expires < datetime.now(timezone.utc):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Lien de réinitialisation invalide ou expiré.",
+        )
+
+    return {"expires_at": user.reset_token_expires}
+
+
 @router.post("/reset-password/{token}")
 async def reset_password(token: str, payload: ResetPasswordRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.reset_token == token).first()
+    hashed_token = _hash_reset_token(token)  # ⬅️ AJOUT : on hash le token reçu dans l'URL...
+    user = db.query(User).filter(User.reset_token == hashed_token).first()  # ⬅️ ...pour le comparer au hash stocké
 
     if not user or not user.reset_token_expires:
         raise HTTPException(
