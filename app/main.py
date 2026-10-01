@@ -37,6 +37,7 @@ from app.api.routes.auth import router as auth_router
 from app.api.routes.profile import router as profile_router
 from app.db.database import SessionLocal
 from app.models.utilisateur import User
+from sqlalchemy import func  # ⬅️ CASSE E-MAIL
 
 from app.api.routes.parcels import router as parcels_router
 from app.api.routes.vector_layers import router as vector_layers_router
@@ -150,7 +151,7 @@ def bootstrap_admin():
             print("🔴 ADMIN_EMAIL n'est pas défini dans .env")
             return
 
-        user = db.query(User).filter(User.email == ADMIN_EMAIL).first()
+        user = db.query(User).filter(func.lower(User.email) == ADMIN_EMAIL).first()  # ⬅️ CASSE E-MAIL
         if not user:
             print(f"🔴 Aucun utilisateur trouvé avec l'email {ADMIN_EMAIL}")
             return

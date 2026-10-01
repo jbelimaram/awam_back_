@@ -202,10 +202,8 @@ def ingest_parcel_indices(parcel_id: int, *, force_refresh: bool = False) -> dic
 
 def ingest_all_active_parcels(*, force_refresh: bool = False) -> dict:
     """
-    Ingère les 14 indices pour TOUTES les parcelles actives.
-
-    "Actives" = parcelles existantes en base (on peut affiner plus tard
-    avec un filtre : status='active', ou raster_status != 'failed', etc.).
+    Ingère les 14 indices pour toutes les parcelles ACTIVES (status = 'active').
+    Une parcelle inactive ne reçoit aucune analyse satellite.
 
     Returns:
         dict {total, ok, failed, skipped_cached, results: [...]}
@@ -221,7 +219,7 @@ def ingest_all_active_parcels(*, force_refresh: bool = False) -> dict:
 
     try:
         rows = db.execute(
-            text("SELECT id FROM parcel ORDER BY id")
+            text("SELECT id FROM parcel WHERE status = 'active' ORDER BY id")
         ).fetchall()
         parcel_ids = [r.id for r in rows]
         summary["total"] = len(parcel_ids)

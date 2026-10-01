@@ -2,7 +2,8 @@ from datetime import datetime
 from typing import Any, Literal, Optional
 from pydantic import BaseModel
 
-RasterStatus = Literal["pending", "ready", "failed"]
+# "none" : aucun traitement lancé (parcelle inactive, pas d'analyse satellite)
+RasterStatus = Literal["pending", "ready", "failed", "none"]
 
 
 class ParcelCreate(BaseModel):
@@ -12,6 +13,8 @@ class ParcelCreate(BaseModel):
     culture_type: Optional[str] = None
     soil_type: Optional[str] = None
     irrigation_type: Optional[str] = None
+    # Une parcelle inactive ne reçoit aucune analyse satellite
+    status: Literal["active", "inactive"] = "active"
 
 
 class ParcelUpdate(BaseModel):

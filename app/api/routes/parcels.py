@@ -13,14 +13,18 @@ Chaque parcelle est rattachée à une ferme et possède :
 rasters) sont deux champs indépendants : ne jamais écrire l'un à la place
 de l'autre.
 
-Déclencheurs Celery :
-  - Création / modification de géométrie :
+Déclencheurs Celery (uniquement pour les parcelles ACTIVES) :
+  - Création d'une parcelle active / modification de géométrie d'une
+    parcelle active / passage inactive → active :
       → generate_parcel_rasters (masque + RGB + NDVI)
       → ingest_parcel_indices  (14 indices spectraux)
   - Route manuelle POST /parcels/{id}/refresh :
-      → ingest_parcel_indices uniquement
+      → ingest_parcel_indices uniquement (refusée si la parcelle est inactive)
   - Celery Beat quotidien 6h :
-      → ingest_all_active_parcels (toutes les parcelles)
+      → ingest_all_active_parcels (parcelles actives uniquement)
+
+Une parcelle inactive ne reçoit aucune analyse : son raster_status vaut
+"none" tant qu'aucun traitement n'a été lancé.
 """
 
 import json
@@ -189,20 +193,21 @@ def create_parcel(
     geom_json = json.dumps(payload.geometry)
 
     # area_ha est calculée automatiquement par PostGIS depuis la géométrie.
-    # status garde sa valeur par défaut ("active") — seul raster_status
-    # reflète que le traitement des rasters démarre.
+    # Parcelle active : le traitement démarre (raster_status "pending").
+    # Parcelle inactive : aucun traitement (raster_status "none").
+    is_active = payload.status == "active"
     row = db.execute(
         text("""
             INSERT INTO parcel (
                 farm_id, name, geom, culture_type, soil_type, irrigation_type,
-                area_ha, raster_status
+                area_ha, status, raster_status
             )
             VALUES (
                 :farm_id, :name,
                 ST_SetSRID(ST_GeomFromGeoJSON(:geom), 4326),
                 :culture_type, :soil_type, :irrigation_type,
                 ST_Area(ST_SetSRID(ST_GeomFromGeoJSON(:geom), 4326)::geography) / 10000.0,
-                'pending'
+                :status, :raster_status
             )
             RETURNING id, farm_id, name,
                       culture_type, soil_type, irrigation_type,
@@ -215,12 +220,15 @@ def create_parcel(
             "culture_type": payload.culture_type,
             "soil_type": payload.soil_type,
             "irrigation_type": payload.irrigation_type,
+            "status": payload.status,
+            "raster_status": "pending" if is_active else "none",
         },
     ).fetchone()
     db.commit()
 
-    # 🆕 Lance les DEUX tâches (rasters + 14 indices)
-    _launch_ingestion_tasks(row.id)
+    # Lance les DEUX tâches (rasters + 14 indices), seulement si la parcelle est active
+    if is_active:
+        _launch_ingestion_tasks(row.id)
 
     return ParcelResponse(
         id=row.id,
@@ -272,6 +280,13 @@ async def refresh_parcel_indices(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Parcelle introuvable.",
+        )
+
+    # Une parcelle inactive ne reçoit pas d'analyse satellite
+    if parcel.status != "active":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La parcelle est inactive : activez-la pour lancer l'analyse.",
         )
 
     # Marquer la parcelle comme "en cours"
@@ -329,7 +344,7 @@ async def get_parcel_raster_status(
       - "pending" : tâche en cours
       - "ready"   : génération terminée avec succès
       - "failed"  : erreur pendant la génération
-      - None      : jamais générée
+      - "none"    : aucun traitement lancé (parcelle inactive)
     """
     parcel = (
         db.query(Parcel)
@@ -395,7 +410,7 @@ def update_parcel(
 ):
     existing = db.execute(
         text("""
-            SELECT p.id FROM parcel p
+            SELECT p.id, p.status FROM parcel p
             JOIN farm f ON f.id = p.farm_id
             WHERE p.id = :parcel_id AND f.user_id = :user_id
         """),
@@ -403,6 +418,14 @@ def update_parcel(
     ).fetchone()
     if not existing:
         raise HTTPException(404, "Parcelle introuvable")
+
+    # Statut après la mise à jour, et passage éventuel inactive → active
+    new_status = payload.status if payload.status is not None else existing.status
+    becomes_active = existing.status != "active" and new_status == "active"
+    geometry_changed = payload.geometry is not None
+    # L'analyse n'est lancée que pour une parcelle active : à l'activation,
+    # ou quand la forme d'une parcelle active change.
+    launch_analysis = new_status == "active" and (becomes_active or geometry_changed)
 
     updates: list[str] = []
     params: dict[str, Any] = {"parcel_id": parcel_id}
@@ -430,8 +453,12 @@ def update_parcel(
         params["geom"] = json.dumps(payload.geometry)
 
     if updates:
-        if payload.geometry is not None:
+        if launch_analysis:
             updates.append("raster_status = 'pending'")
+        elif geometry_changed:
+            # Forme modifiée sur une parcelle inactive : les anciennes images
+            # ne correspondent plus, l'analyse sera lancée à l'activation.
+            updates.append("raster_status = 'none'")
 
         db.execute(
             text(f"UPDATE parcel SET {', '.join(updates)} WHERE id = :parcel_id"),
@@ -439,8 +466,8 @@ def update_parcel(
         )
         db.commit()
 
-        # 🆕 Si la géométrie a changé, relance les DEUX tâches
-        if payload.geometry is not None:
+        # Relance les DEUX tâches (rasters + 14 indices) si la parcelle est active
+        if launch_analysis:
             _launch_ingestion_tasks(parcel_id)
 
     row = db.execute(
@@ -460,7 +487,6 @@ def update_parcel(
     return _parcel_to_response(row, raster_urls)
 
 
-# ----------------------------------------------------------------------
 # DELETE /parcels/{parcel_id}
 # ----------------------------------------------------------------------
 
@@ -482,6 +508,21 @@ def delete_parcel(
     if not existing:
         raise HTTPException(404, "Parcelle introuvable")
 
+    # La clé étrangère activity.parcel_id n'a pas de ON DELETE CASCADE :
+    # on supprime d'abord les affectations d'employés et les activités de
+    # la parcelle, puis la parcelle (alertes, indices et rasters suivent
+    # par cascade). Le tout dans une seule transaction.
+    db.execute(
+        text("""
+            DELETE FROM activity_employee
+            WHERE activity_id IN (SELECT id FROM activity WHERE parcel_id = :parcel_id)
+        """),
+        {"parcel_id": parcel_id},
+    )
+    db.execute(
+        text("DELETE FROM activity WHERE parcel_id = :parcel_id"),
+        {"parcel_id": parcel_id},
+    )
     db.execute(
         text("DELETE FROM parcel WHERE id = :parcel_id"),
         {"parcel_id": parcel_id},
