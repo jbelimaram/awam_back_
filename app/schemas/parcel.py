@@ -1,5 +1,8 @@
-from typing import Any, Optional
+from datetime import datetime
+from typing import Any, Literal, Optional
 from pydantic import BaseModel
+
+RasterStatus = Literal["pending", "ready", "failed"]
 
 
 class ParcelCreate(BaseModel):
@@ -17,6 +20,7 @@ class ParcelUpdate(BaseModel):
     culture_type: Optional[str] = None
     soil_type: Optional[str] = None
     irrigation_type: Optional[str] = None
+    status: Optional[Literal["active", "inactive"]] = None
 
 
 class ParcelResponse(BaseModel):
@@ -24,12 +28,17 @@ class ParcelResponse(BaseModel):
     farm_id: int
     name: str
     culture_type: Optional[str] = None
+    soil_type: Optional[str] = None
+    irrigation_type: Optional[str] = None
     area_ha: Optional[float] = None
-    status: str
+    status: str  # état agronomique (active / inactive...), indépendant des rasters
     geometry: Optional[dict[str, Any]] = None  # forme du polygone renvoyée au frontend
 
     cog_url: Optional[str] = None
-    landsat_rgb_url: Optional[str] = None
-    landsat_ndvi_url: Optional[str] = None
+    sentinel_rgb_url: Optional[str] = None
+    sentinel_ndvi_url: Optional[str] = None
+
+    raster_status: RasterStatus
+    created_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}

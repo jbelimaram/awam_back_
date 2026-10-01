@@ -11,3 +11,8 @@ class Employee(Base):
     phone = Column(String(30), nullable=True)
 
     activities = relationship("Activity", secondary="activity_employee", back_populates="employees")
+    farm_links = relationship(
+        "FarmEmployee",
+        back_populates="employee",
+        cascade="all, delete-orphan",
+    )

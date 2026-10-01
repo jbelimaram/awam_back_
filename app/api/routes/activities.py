@@ -10,13 +10,11 @@ from app.models.parcel import Parcel
 from app.models.employee import Employee
 from app.models.activity import Activity
 from app.schemas.activity import ActivityCreate, ActivityUpdate, ActivityResponse
-from datetime import datetime, timezone
 
 router = APIRouter(tags=["activities"])
 
 
 def _get_owned_parcel(parcel_id: int, user: User, db: Session) -> Parcel:
-    """Récupère une parcelle uniquement si elle appartient à l'utilisateur courant."""
     parcel = (
         db.query(Parcel)
         .join(Farm)
@@ -29,7 +27,6 @@ def _get_owned_parcel(parcel_id: int, user: User, db: Session) -> Parcel:
 
 
 def _get_owned_activity(activity_id: int, user: User, db: Session) -> Activity:
-    """Récupère une activité uniquement si sa parcelle appartient à l'utilisateur courant."""
     activity = (
         db.query(Activity)
         .join(Parcel, Activity.parcel_id == Parcel.id)
@@ -76,7 +73,7 @@ async def create_activity(
     new_activity = Activity(
         parcel_id=payload.parcel_id,
         activity_type=payload.activity_type,
-        performed_at=payload.performed_at or datetime.now(timezone.utc),
+        performed_at=payload.performed_at,
     )
     new_activity.employees = employees
 
@@ -97,8 +94,8 @@ async def update_activity(
 
     update_data = payload.model_dump(exclude_unset=True, exclude={"employee_ids"})
 
-    if "parcel_id" in update_data:
-        _get_owned_parcel(update_data["parcel_id"], user, db)
+    if payload.parcel_id is not None:
+        _get_owned_parcel(payload.parcel_id, user, db)
 
     for field, value in update_data.items():
         setattr(activity, field, value)
@@ -124,7 +121,6 @@ async def delete_activity(
     db: Session = Depends(get_db),
 ):
     activity = _get_owned_activity(activity_id, user, db)
-
     db.delete(activity)
     db.commit()
     return None

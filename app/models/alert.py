@@ -8,7 +8,7 @@ class Alert(Base):
     __tablename__ = "alert"
 
     id = Column(Integer, primary_key=True, index=True)
-    parcel_id = Column(Integer, ForeignKey("parcel.id"), nullable=False, index=True)
+    parcel_id = Column(Integer, ForeignKey("parcel.id", ondelete="CASCADE"), nullable=False, index=True)
 
     alert_type = Column(String(100), nullable=False)
     severity = Column(String(50), nullable=False)

@@ -8,3 +8,6 @@ __pycache__/
 *.sqlite3 
 celerybeat-schedule.* 
 iris.parquet 
+.venv/
+env/
+celerybeat-schedule*

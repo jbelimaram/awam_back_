@@ -56,3 +56,19 @@ REDIS_URL = os.getenv("REDIS_URL")
 
 if not REDIS_URL:
     raise ValueError("REDIS_URL doit être défini dans .env")
+
+
+# ----------------------------------------------------------------------
+# Backblaze B2
+# ----------------------------------------------------------------------
+B2_KEY_ID = os.getenv("B2_KEY_ID")
+B2_APPLICATION_KEY = os.getenv("B2_APPLICATION_KEY")
+B2_BUCKET_NAME = os.getenv("B2_BUCKET_NAME")
+B2_ENDPOINT_URL = os.getenv("B2_ENDPOINT_URL")
+B2_REGION = os.getenv("B2_REGION", "us-east-005")
+
+if not all([B2_KEY_ID, B2_APPLICATION_KEY, B2_BUCKET_NAME, B2_ENDPOINT_URL]):
+    raise ValueError(
+        "B2_KEY_ID, B2_APPLICATION_KEY, B2_BUCKET_NAME et B2_ENDPOINT_URL "
+        "doivent être définis dans .env"
+    )

@@ -36,7 +36,7 @@ def check_and_send_reminders():
             .filter(
                 AgendaEvent.reminder_sent == False,
                 AgendaEvent.status == "a_faire",
-                AgendaEvent.start_datetime > now,
+                AgendaEvent.start_at > now,
             )
             .all()
         )
@@ -48,7 +48,7 @@ def check_and_send_reminders():
             if delta is None:
                 continue
 
-            remind_at = event.start_datetime - delta
+            remind_at = event.start_at - delta
             if remind_at > now:
                 continue
 
@@ -56,7 +56,7 @@ def check_and_send_reminders():
             if not user:
                 continue
 
-            event_datetime_str = event.start_datetime.strftime("%d/%m/%Y à %H:%M")
+            event_datetime_str = event.start_at.strftime("%d/%m/%Y à %H:%M")
 
             try:
                 send_agenda_reminder_email(user.email, event.title, event_datetime_str)

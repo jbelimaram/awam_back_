@@ -1,186 +1,490 @@
-from typing import List
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
-from geoalchemy2.shape import from_shape, to_shape
-from shapely.geometry import shape, mapping
+"""
+Routes API pour les parcelles.
 
-from app.core.security import get_current_user
-from app.db.database import get_db
-from app.models.utilisateur import User
+Chaque parcelle est rattachée à une ferme et possède :
+  - une géométrie PostGIS (Polygon)
+  - des métadonnées agronomiques (culture, sol, irrigation)
+  - un masque colorisé (COG) généré automatiquement
+  - optionnellement des composites Sentinel-2 (RGB + NDVI), avec historique
+  - 14 indices spectraux (NDVI, NDMI, NDWI, NDRE, EVI, SAVI, MSAVI,
+    NBR, REDEDGE, VARI, CARBONATE, SI_SOIL, PSRI, FCOVER)
+
+`status` (état agronomique) et `raster_status` (état du traitement des
+rasters) sont deux champs indépendants : ne jamais écrire l'un à la place
+de l'autre.
+
+Déclencheurs Celery :
+  - Création / modification de géométrie :
+      → generate_parcel_rasters (masque + RGB + NDVI)
+      → ingest_parcel_indices  (14 indices spectraux)
+  - Route manuelle POST /parcels/{id}/refresh :
+      → ingest_parcel_indices uniquement
+  - Celery Beat quotidien 6h :
+      → ingest_all_active_parcels (toutes les parcelles)
+"""
+
+import json
+import logging
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+
 from app.models.farm import Farm
 from app.models.parcel import Parcel
-from app.models.raster import Raster
+from app.db.database import get_db
+from app.models.utilisateur import User
+from app.api.routes.auth import get_current_user
+from app.schemas.parcel import ParcelCreate, ParcelResponse, ParcelUpdate
 from app.services.b2_storage import generate_presigned_url
-from app.schemas.parcel import ParcelCreate, ParcelUpdate, ParcelResponse
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/parcels", tags=["parcels"])
 
 RASTER_TYPE_TO_FIELD = {
-    "cog": "cog_url",
-    "landsat_rgb": "landsat_rgb_url",
-    "landsat_ndvi": "landsat_ndvi_url",
+    "mask": "cog_url",
+    "sentinel_rgb": "sentinel_rgb_url",
+    "sentinel_ndvi": "sentinel_ndvi_url",
 }
 
 
-def _get_latest_rasters_by_type(parcel_id: int, db: Session) -> dict[str, Raster]:
-    """Retourne, pour une parcelle, le raster le plus récent par type
-    (cog / landsat_rgb / landsat_ndvi), à partir de l'historique complet stocké en base."""
-    latest: dict[str, Raster] = {}
-    rasters = (
-        db.query(Raster)
-        .filter(Raster.parcel_id == parcel_id)
-        .order_by(Raster.created_at.desc())
-        .all()
+# ----------------------------------------------------------------------
+# Helpers
+# ----------------------------------------------------------------------
+
+
+def _fetch_raster_urls_for_parcel(db: Session, parcel_id: int) -> dict[str, str | None]:
+    """Récupère les URLs signées des rasters les plus récents par type."""
+    rows = db.execute(
+        text("""
+            SELECT DISTINCT ON (raster_type) raster_type, b2_key
+            FROM raster
+            WHERE parcel_id = :parcel_id
+            ORDER BY raster_type, COALESCE(scene_date, created_at::date) DESC, created_at DESC
+        """),
+        {"parcel_id": parcel_id},
+    ).fetchall()
+
+    result: dict[str, str | None] = {v: None for v in RASTER_TYPE_TO_FIELD.values()}
+    for row in rows:
+        field = RASTER_TYPE_TO_FIELD.get(row.raster_type)
+        if not field:
+            continue
+        try:
+            result[field] = generate_presigned_url(row.b2_key, expires_in=3600)
+        except Exception:
+            logger.exception(
+                "Impossible de signer l'URL B2 pour parcel_id=%s type=%s",
+                parcel_id,
+                row.raster_type,
+            )
+            result[field] = None
+
+    return result
+
+
+def _parcel_to_response(parcel_row, raster_urls: dict) -> ParcelResponse:
+    """Assemble la réponse ParcelResponse à partir de la ligne SQL + rasters."""
+    return ParcelResponse(
+        id=parcel_row.id,
+        farm_id=parcel_row.farm_id,
+        name=parcel_row.name,
+        culture_type=parcel_row.culture_type,
+        soil_type=parcel_row.soil_type,
+        irrigation_type=parcel_row.irrigation_type,
+        area_ha=parcel_row.area_ha,
+        status=parcel_row.status,
+        cog_url=raster_urls.get("cog_url"),
+        sentinel_rgb_url=raster_urls.get("sentinel_rgb_url"),
+        sentinel_ndvi_url=raster_urls.get("sentinel_ndvi_url"),
+        raster_status=parcel_row.raster_status,
+        created_at=parcel_row.created_at,
     )
-    for raster in rasters:
-        if raster.raster_type not in latest:
-            latest[raster.raster_type] = raster
-    return latest
 
 
-def _parcel_to_response(parcel: Parcel, db: Session) -> dict:
-    """Convertit une Parcel (avec son geom PostGIS) en dict compatible ParcelResponse,
-    en reconvertissant geom -> GeoJSON, et en résolvant les URLs de rasters les plus récentes."""
-    geojson = mapping(to_shape(parcel.geom)) if parcel.geom is not None else None
+def _launch_ingestion_tasks(parcel_id: int) -> None:
+    """
+    Lance les 2 tâches Celery pour une parcelle :
+      - generate_parcel_rasters (masque + RGB + NDVI)
+      - ingest_parcel_indices  (14 indices spectraux)
 
-    latest_rasters = _get_latest_rasters_by_type(parcel.id, db)
-    urls = {"cog_url": None, "landsat_rgb_url": None, "landsat_ndvi_url": None}
-    for raster_type, field_name in RASTER_TYPE_TO_FIELD.items():
-        raster = latest_rasters.get(raster_type)
-        if raster:
-            urls[field_name] = generate_presigned_url(raster.b2_key)
+    Gère les cas où Celery n'est pas configuré (warning, pas d'exception).
+    """
+    try:
+        from app.tasks.parcel_tasks import generate_parcel_rasters_task
+        from app.tasks.ingestion_tasks import ingest_parcel_indices_task
 
-    return {
-        "id": parcel.id,
-        "farm_id": parcel.farm_id,
-        "name": parcel.name,
-        "culture_type": parcel.culture_type,
-        "area_ha": parcel.area_ha,
-        "status": parcel.status,
-        "geometry": geojson,
-        **urls,
-    }
+        if generate_parcel_rasters_task is not None:
+            generate_parcel_rasters_task.delay(parcel_id)
+            logger.info("Tâche generate_rasters lancée pour parcel_id=%s", parcel_id)
+        else:
+            logger.warning(
+                "Celery indisponible : rasters non générés pour parcel_id=%s",
+                parcel_id,
+            )
+
+        if ingest_parcel_indices_task is not None:
+            ingest_parcel_indices_task.delay(parcel_id)
+            logger.info("Tâche ingest_indices lancée pour parcel_id=%s", parcel_id)
+        else:
+            logger.warning(
+                "Celery indisponible : indices non générés pour parcel_id=%s",
+                parcel_id,
+            )
+    except Exception:
+        logger.exception("Échec du lancement des tâches Celery")
 
 
-def _compute_area_ha(parcel_id: int, db: Session) -> float | None:
-    """Calcule l'aire géodésique d'une parcelle en hectares via PostGIS
-    (geometry -> geography pour obtenir des m², puis conversion en ha)."""
-    return db.scalar(
-        select(func.ST_Area(func.geography(Parcel.geom)) / 10000.0).where(Parcel.id == parcel_id)
-    )
+# ----------------------------------------------------------------------
+# GET /parcels — liste
+# ----------------------------------------------------------------------
 
 
-@router.get("", response_model=List[ParcelResponse])
-async def list_parcels(
-    farm_id: int | None = None,
-    user: User = Depends(get_current_user),
+@router.get("", response_model=list[ParcelResponse])
+def list_parcels(
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    query = db.query(Parcel).join(Farm).filter(Farm.user_id == user.id)
-    if farm_id is not None:
-        query = query.filter(Parcel.farm_id == farm_id)
-    parcels = query.order_by(Parcel.name).all()
-    return [_parcel_to_response(p, db) for p in parcels]
+    rows = db.execute(
+        text("""
+            SELECT
+                p.id, p.farm_id, p.name,
+                p.culture_type, p.soil_type, p.irrigation_type,
+                p.status, p.raster_status, p.created_at,
+                ST_Area(p.geom::geography) / 10000.0 AS area_ha
+            FROM parcel p
+            JOIN farm f ON f.id = p.farm_id
+            WHERE f.user_id = :user_id
+            ORDER BY p.id DESC
+        """),
+        {"user_id": current_user.id},
+    ).fetchall()
+
+    return [
+        _parcel_to_response(r, _fetch_raster_urls_for_parcel(db, r.id))
+        for r in rows
+    ]
 
 
-@router.get("/{parcel_id}", response_model=ParcelResponse)
-async def get_parcel(
-    parcel_id: int,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    parcel = (
-        db.query(Parcel)
-        .join(Farm)
-        .filter(Parcel.id == parcel_id, Farm.user_id == user.id)
-        .first()
-    )
-    if not parcel:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Parcelle introuvable.")
-    return _parcel_to_response(parcel, db)
+# ----------------------------------------------------------------------
+# POST /parcels — création
+# ----------------------------------------------------------------------
 
 
 @router.post("", response_model=ParcelResponse, status_code=status.HTTP_201_CREATED)
-async def create_parcel(
+def create_parcel(
     payload: ParcelCreate,
-    user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    farm = db.query(Farm).filter(Farm.id == payload.farm_id, Farm.user_id == user.id).first()
+    farm = db.execute(
+        text("SELECT id FROM farm WHERE id = :farm_id AND user_id = :user_id"),
+        {"farm_id": payload.farm_id, "user_id": current_user.id},
+    ).fetchone()
     if not farm:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ferme introuvable.")
+        raise HTTPException(404, "Ferme introuvable ou non autorisée")
 
-    shapely_geom = shape(payload.geometry)
-    geom_value = from_shape(shapely_geom, srid=4326)
+    geom_json = json.dumps(payload.geometry)
 
-    new_parcel = Parcel(
-        farm_id=payload.farm_id,
-        name=payload.name,
-        culture_type=payload.culture_type,
-        soil_type=payload.soil_type,
-        irrigation_type=payload.irrigation_type,
-        geom=geom_value,
-    )
-    db.add(new_parcel)
-    db.flush()  # génère l'id sans valider la transaction
-    new_parcel.area_ha = _compute_area_ha(new_parcel.id, db)
+    # area_ha est calculée automatiquement par PostGIS depuis la géométrie.
+    # status garde sa valeur par défaut ("active") — seul raster_status
+    # reflète que le traitement des rasters démarre.
+    row = db.execute(
+        text("""
+            INSERT INTO parcel (
+                farm_id, name, geom, culture_type, soil_type, irrigation_type,
+                area_ha, raster_status
+            )
+            VALUES (
+                :farm_id, :name,
+                ST_SetSRID(ST_GeomFromGeoJSON(:geom), 4326),
+                :culture_type, :soil_type, :irrigation_type,
+                ST_Area(ST_SetSRID(ST_GeomFromGeoJSON(:geom), 4326)::geography) / 10000.0,
+                'pending'
+            )
+            RETURNING id, farm_id, name,
+                      culture_type, soil_type, irrigation_type,
+                      status, raster_status, created_at, area_ha
+        """),
+        {
+            "farm_id": payload.farm_id,
+            "name": payload.name,
+            "geom": geom_json,
+            "culture_type": payload.culture_type,
+            "soil_type": payload.soil_type,
+            "irrigation_type": payload.irrigation_type,
+        },
+    ).fetchone()
     db.commit()
-    db.refresh(new_parcel)
-    return _parcel_to_response(new_parcel, db)
+
+    # 🆕 Lance les DEUX tâches (rasters + 14 indices)
+    _launch_ingestion_tasks(row.id)
+
+    return ParcelResponse(
+        id=row.id,
+        farm_id=row.farm_id,
+        name=row.name,
+        culture_type=row.culture_type,
+        soil_type=row.soil_type,
+        irrigation_type=row.irrigation_type,
+        area_ha=row.area_ha,
+        status=row.status,
+        cog_url=None,
+        sentinel_rgb_url=None,
+        sentinel_ndvi_url=None,
+        raster_status=row.raster_status,
+        created_at=row.created_at,
+    )
+
+
+# ----------------------------------------------------------------------
+# POST /parcels/{parcel_id}/refresh — ingestion des 14 indices
+# ----------------------------------------------------------------------
+
+
+@router.post("/{parcel_id}/refresh")
+async def refresh_parcel_indices(
+    parcel_id: int,
+    force_refresh: bool = False,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Déclenche l'ingestion des 14 indices spectraux pour une parcelle.
+
+    - **parcel_id** : id de la parcelle
+    - **force_refresh** : si True, ignore le cache et remplace même si
+                          la scène existante a moins de nuages
+
+    Retourne immédiatement (tâche Celery lancée en arrière-plan).
+    Pour suivre le statut, consulter `parcel.raster_status` ou les logs.
+    """
+    # Vérifier que la parcelle appartient à l'utilisateur
+    parcel = (
+        db.query(Parcel)
+        .join(Farm)
+        .filter(Parcel.id == parcel_id, Farm.user_id == current_user.id)
+        .first()
+    )
+    if not parcel:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Parcelle introuvable.",
+        )
+
+    # Marquer la parcelle comme "en cours"
+    parcel.raster_status = "pending"
+    db.commit()
+
+    # Lancer la tâche Celery (import différé pour éviter un import circulaire)
+    from app.tasks.ingestion_tasks import ingest_parcel_indices_task
+
+    if ingest_parcel_indices_task is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Celery n'est pas configuré. Ingestion impossible.",
+        )
+
+    try:
+        task = ingest_parcel_indices_task.delay(
+            parcel_id=parcel_id, force_refresh=force_refresh
+        )
+    except Exception as e:
+        parcel.raster_status = "failed"
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Impossible de lancer la tâche Celery : {e}",
+        )
+
+    return {
+        "parcel_id": parcel_id,
+        "task_id": task.id,
+        "status": "pending",
+        "force_refresh": force_refresh,
+        "message": (
+            "Ingestion des 14 indices lancée en arrière-plan. "
+            "Suivre via /parcels/{id}/raster_status ou les logs Celery."
+        ),
+    }
+
+
+# ----------------------------------------------------------------------
+# GET /parcels/{parcel_id}/raster_status — statut des rasters
+# ----------------------------------------------------------------------
+
+
+@router.get("/{parcel_id}/raster_status")
+async def get_parcel_raster_status(
+    parcel_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Retourne le statut de génération des rasters d'une parcelle.
+
+    Valeurs possibles :
+      - "pending" : tâche en cours
+      - "ready"   : génération terminée avec succès
+      - "failed"  : erreur pendant la génération
+      - None      : jamais générée
+    """
+    parcel = (
+        db.query(Parcel)
+        .join(Farm)
+        .filter(Parcel.id == parcel_id, Farm.user_id == current_user.id)
+        .first()
+    )
+    if not parcel:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Parcelle introuvable.",
+        )
+
+    return {
+        "parcel_id": parcel_id,
+        "raster_status": getattr(parcel, "raster_status", None),
+    }
+
+
+# ----------------------------------------------------------------------
+# GET /parcels/{parcel_id} — détail
+# ----------------------------------------------------------------------
+
+
+@router.get("/{parcel_id}", response_model=ParcelResponse)
+def get_parcel(
+    parcel_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    row = db.execute(
+        text("""
+            SELECT
+                p.id, p.farm_id, p.name,
+                p.culture_type, p.soil_type, p.irrigation_type,
+                p.status, p.raster_status, p.created_at,
+                ST_Area(p.geom::geography) / 10000.0 AS area_ha
+            FROM parcel p
+            JOIN farm f ON f.id = p.farm_id
+            WHERE p.id = :parcel_id AND f.user_id = :user_id
+        """),
+        {"parcel_id": parcel_id, "user_id": current_user.id},
+    ).fetchone()
+
+    if not row:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Parcelle introuvable")
+
+    raster_urls = _fetch_raster_urls_for_parcel(db, parcel_id)
+    return _parcel_to_response(row, raster_urls)
+
+
+# ----------------------------------------------------------------------
+# PUT /parcels/{parcel_id} — mise à jour
+# ----------------------------------------------------------------------
 
 
 @router.put("/{parcel_id}", response_model=ParcelResponse)
-async def update_parcel(
+def update_parcel(
     parcel_id: int,
     payload: ParcelUpdate,
-    user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    parcel = (
-        db.query(Parcel)
-        .join(Farm)
-        .filter(Parcel.id == parcel_id, Farm.user_id == user.id)
-        .first()
-    )
-    if not parcel:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Parcelle introuvable.")
+    existing = db.execute(
+        text("""
+            SELECT p.id FROM parcel p
+            JOIN farm f ON f.id = p.farm_id
+            WHERE p.id = :parcel_id AND f.user_id = :user_id
+        """),
+        {"parcel_id": parcel_id, "user_id": current_user.id},
+    ).fetchone()
+    if not existing:
+        raise HTTPException(404, "Parcelle introuvable")
 
-    update_data = payload.model_dump(exclude_unset=True)
-    geometry_changed = "geometry" in update_data
+    updates: list[str] = []
+    params: dict[str, Any] = {"parcel_id": parcel_id}
 
-    if geometry_changed:
-        geojson_value = update_data.pop("geometry")
-        shapely_geom = shape(geojson_value)
-        parcel.geom = from_shape(shapely_geom, srid=4326)
+    if payload.name is not None:
+        updates.append("name = :name")
+        params["name"] = payload.name
+    if payload.culture_type is not None:
+        updates.append("culture_type = :culture_type")
+        params["culture_type"] = payload.culture_type
+    if payload.soil_type is not None:
+        updates.append("soil_type = :soil_type")
+        params["soil_type"] = payload.soil_type
+    if payload.irrigation_type is not None:
+        updates.append("irrigation_type = :irrigation_type")
+        params["irrigation_type"] = payload.irrigation_type
+    if payload.status is not None:  # ⬅️ AJOUT : permet de changer active/inactive
+        updates.append("status = :status")
+        params["status"] = payload.status
+    if payload.geometry is not None:
+        updates.append("geom = ST_SetSRID(ST_GeomFromGeoJSON(:geom), 4326)")
+        updates.append(
+            "area_ha = ST_Area(ST_SetSRID(ST_GeomFromGeoJSON(:geom), 4326)::geography) / 10000.0"
+        )
+        params["geom"] = json.dumps(payload.geometry)
 
-    for field, value in update_data.items():
-        setattr(parcel, field, value)
+    if updates:
+        if payload.geometry is not None:
+            updates.append("raster_status = 'pending'")
 
-    if geometry_changed:
-        db.flush()  # envoie la nouvelle géométrie à PostGIS avant de recalculer l'aire
-        parcel.area_ha = _compute_area_ha(parcel.id, db)
+        db.execute(
+            text(f"UPDATE parcel SET {', '.join(updates)} WHERE id = :parcel_id"),
+            params,
+        )
+        db.commit()
 
-    db.commit()
-    db.refresh(parcel)
-    return _parcel_to_response(parcel, db)
+        # 🆕 Si la géométrie a changé, relance les DEUX tâches
+        if payload.geometry is not None:
+            _launch_ingestion_tasks(parcel_id)
+
+    row = db.execute(
+        text("""
+            SELECT
+                p.id, p.farm_id, p.name,
+                p.culture_type, p.soil_type, p.irrigation_type,
+                p.status, p.raster_status, p.created_at,
+                ST_Area(p.geom::geography) / 10000.0 AS area_ha
+            FROM parcel p
+            WHERE p.id = :parcel_id
+        """),
+        {"parcel_id": parcel_id},
+    ).fetchone()
+
+    raster_urls = _fetch_raster_urls_for_parcel(db, parcel_id)
+    return _parcel_to_response(row, raster_urls)
+
+
+# ----------------------------------------------------------------------
+# DELETE /parcels/{parcel_id}
+# ----------------------------------------------------------------------
 
 
 @router.delete("/{parcel_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_parcel(
+def delete_parcel(
     parcel_id: int,
-    user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    parcel = (
-        db.query(Parcel)
-        .join(Farm)
-        .filter(Parcel.id == parcel_id, Farm.user_id == user.id)
-        .first()
-    )
-    if not parcel:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Parcelle introuvable.")
+    existing = db.execute(
+        text("""
+            SELECT p.id FROM parcel p
+            JOIN farm f ON f.id = p.farm_id
+            WHERE p.id = :parcel_id AND f.user_id = :user_id
+        """),
+        {"parcel_id": parcel_id, "user_id": current_user.id},
+    ).fetchone()
+    if not existing:
+        raise HTTPException(404, "Parcelle introuvable")
 
-    db.delete(parcel)
+    db.execute(
+        text("DELETE FROM parcel WHERE id = :parcel_id"),
+        {"parcel_id": parcel_id},
+    )
     db.commit()
     return None

@@ -46,7 +46,7 @@ def send_agenda_reminder_email(to_email: str, event_title: str, event_datetime_s
     <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px;">
         <h2 style="color: #1a1a1a;">Rappel : {event_title}</h2>
         <p style="color: #333; font-size: 15px; line-height: 1.5;">
-            Vous avez un événement prévu demain sur AWAM :
+            Vous avez un événement à venir sur AWAM :
         </p>
         <div style="background-color: #f5f5f0; border-radius: 8px; padding: 16px; margin: 20px 0;">
             <p style="margin: 0; font-weight: bold; color: #1a1a1a;">{event_title}</p>

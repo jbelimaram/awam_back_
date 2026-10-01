@@ -35,6 +35,31 @@ config.set_main_option("sqlalchemy.url", sync_url)
 target_metadata = Base.metadata
 
 
+# --- Tables système à ignorer (PostGIS, etc.) ---
+EXCLUDED_TABLES = {
+        # PostGIS core
+    "spatial_ref_sys",
+    "geography_columns",
+    "geometry_columns",
+    # PostGIS raster
+    "raster_columns",
+    "raster_overviews",
+    # PostGIS topology
+    "topology",
+    "layer",
+    # PostGIS tiger geocoder (si installé)
+    "tiger",
+    "tiger_data",
+}
+
+
+def include_object(object, name, type_, reflected, compare_to):
+    # Ignore les tables système PostGIS
+    if type_ == "table" and name in EXCLUDED_TABLES:
+        return False
+    return True
+
+
 def run_migrations_offline() -> None:
     url = config.get_main_option("sqlalchemy.url")
     context.configure(
@@ -42,6 +67,8 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        include_object=include_object,
+        compare_type=True,
     )
 
     with context.begin_transaction():
@@ -57,7 +84,10 @@ def run_migrations_online() -> None:
 
     with connectable.connect() as connection:
         context.configure(
-            connection=connection, target_metadata=target_metadata
+            connection=connection,
+            target_metadata=target_metadata,
+            include_object=include_object,
+            compare_type=True,
         )
 
         with context.begin_transaction():
