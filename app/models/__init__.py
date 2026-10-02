@@ -8,11 +8,12 @@ from app.models.employee import Employee
 from app.models.indice_reading import IndiceReading
 from app.models.imported_file import ImportedFile
 from app.models.raster import Raster
+from app.models.parcel_analysis import ParcelAnalysis
 from .farm_employee import *
 
 
 __all__ = [
     "User", "Farm", "Parcel", "Activity",
     "Employee", "Alert", "IndiceReading",
-    "Raster", "SpatialReference",
+    "Raster", "SpatialReference", "ParcelAnalysis",
 ]

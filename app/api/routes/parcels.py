@@ -19,7 +19,8 @@ Déclencheurs Celery (uniquement pour les parcelles ACTIVES) :
       → generate_parcel_rasters (masque + RGB + NDVI)
       → ingest_parcel_indices  (14 indices spectraux)
   - Route manuelle POST /parcels/{id}/refresh :
-      → ingest_parcel_indices uniquement (refusée si la parcelle est inactive)
+      → ingest_parcel_indices ET generate_parcel_rasters
+        (refusée si la parcelle est inactive)
   - Celery Beat quotidien 6h :
       → ingest_all_active_parcels (parcelles actives uniquement)
 
@@ -248,7 +249,7 @@ def create_parcel(
 
 
 # ----------------------------------------------------------------------
-# POST /parcels/{parcel_id}/refresh — ingestion des 14 indices
+# POST /parcels/{parcel_id}/refresh — indices + composites Sentinel
 # ----------------------------------------------------------------------
 
 
@@ -260,13 +261,15 @@ async def refresh_parcel_indices(
     db: Session = Depends(get_db),
 ):
     """
-    Déclenche l'ingestion des 14 indices spectraux pour une parcelle.
+    Relance l'analyse satellite complète d'une parcelle :
+      - les 14 indices spectraux (ingest_parcel_indices)
+      - l'image satellite découpée sur le polygone (generate_parcel_rasters)
 
     - **parcel_id** : id de la parcelle
     - **force_refresh** : si True, ignore le cache et remplace même si
                           la scène existante a moins de nuages
 
-    Retourne immédiatement (tâche Celery lancée en arrière-plan).
+    Retourne immédiatement (tâches Celery lancées en arrière-plan).
     Pour suivre le statut, consulter `parcel.raster_status` ou les logs.
     """
     # Vérifier que la parcelle appartient à l'utilisateur
@@ -306,6 +309,13 @@ async def refresh_parcel_indices(
         task = ingest_parcel_indices_task.delay(
             parcel_id=parcel_id, force_refresh=force_refresh
         )
+        # Régénère aussi les composites (image satellite découpée sur le
+        # polygone) : les indices seuls ne mettent pas l'image à jour.
+        from app.tasks.parcel_tasks import generate_parcel_rasters_task
+
+        if generate_parcel_rasters_task is not None:
+            generate_parcel_rasters_task.delay(parcel_id)
+            logger.info("Tâche generate_rasters relancée pour parcel_id=%s", parcel_id)
     except Exception as e:
         parcel.raster_status = "failed"
         db.commit()
@@ -320,7 +330,7 @@ async def refresh_parcel_indices(
         "status": "pending",
         "force_refresh": force_refresh,
         "message": (
-            "Ingestion des 14 indices lancée en arrière-plan. "
+            "Analyse lancée en arrière-plan (indices + image satellite). "
             "Suivre via /parcels/{id}/raster_status ou les logs Celery."
         ),
     }

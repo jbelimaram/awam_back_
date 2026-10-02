@@ -31,12 +31,14 @@ import logging
 import tempfile
 import warnings
 from datetime import datetime, timedelta
+import json
 
 # ----------------------------------------------------------------------
 # Imports tiers
 # ----------------------------------------------------------------------
 import numpy as np
 import rasterio
+from rasterio.enums import ColorInterp
 import rioxarray
 from rasterio.enums import Resampling
 from rasterio.warp import transform_bounds
@@ -219,7 +221,37 @@ def _search_best_scene(
 # ----------------------------------------------------------------------
 # Lecture des bandes (avec upsampling)
 # ----------------------------------------------------------------------
+def _get_geometry_for_parcel(db: Session, parcel_id: int) -> dict | None:
+    """Polygone de la parcelle en GeoJSON (EPSG:4326), ou None."""
+    row = db.execute(
+        text("SELECT ST_AsGeoJSON(geom) AS geojson FROM parcel WHERE id = :parcel_id"),
+        {"parcel_id": parcel_id},
+    ).fetchone()
+    if not row or not row.geojson:
+        return None
+    return json.loads(row.geojson)
 
+
+def _build_parcel_mask(geometry: dict, transform, crs, shape: tuple[int, int]):
+    """
+    Masque booléen aux dimensions de l'image : True HORS de la parcelle.
+
+    Les bandes sont découpées sur la bbox (un rectangle) ; ce masque sert à
+    rendre transparent tout ce qui dépasse le polygone réel, pour que l'image
+    affichée épouse exactement les limites de la parcelle.
+    """
+    from rasterio.features import geometry_mask
+    from rasterio.warp import transform_geom
+
+    # Le polygone est en EPSG:4326, l'image dans la projection de la scène
+    geom = transform_geom("EPSG:4326", crs.to_string(), geometry)
+    return geometry_mask(
+        [geom],
+        out_shape=shape,
+        transform=transform,
+        invert=False,     # True = pixel HORS du polygone
+        all_touched=True,  # garde les pixels de bordure, évite un liseré rogné
+    )
 
 def _clip_band_to_bbox(
     item,
@@ -361,13 +393,13 @@ def _compute_blocksize(height: int, width: int) -> int:
 # ----------------------------------------------------------------------
 
 
-def _write_rgb_cog(red, green, blue, transform, crs, dst_path: str) -> None:
+def _write_rgb_cog(red, green, blue, transform, crs, dst_path: str, alpha=None) -> None:
     """
     Écrit un COG RGB (3 bandes uint8) avec compression optimisée.
 
-    IMPORTANT : les options COG (BLOCKSIZE, LEVEL, PREDICTOR, OVERVIEW_RESAMPLING)
-    ne doivent être passées QU'À cog_translate, PAS à rasterio.open().
-    Sinon GDAL affiche des warnings "CPLE_NotSupported".
+    `alpha` : bande de transparence optionnelle (uint8, 0 = transparent).
+    Fournie quand l'image est découpée sur le polygone de la parcelle, pour
+    que les pixels hors parcelle n'apparaissent pas.
     """
     from rio_cogeo.cogeo import cog_translate
     from rio_cogeo.profiles import cog_profiles
@@ -375,13 +407,14 @@ def _write_rgb_cog(red, green, blue, transform, crs, dst_path: str) -> None:
     tmp_tif = dst_path.replace(".tif", "_tmp.tif")
     height, width = red.shape
     blocksize = _compute_blocksize(height, width)
+    band_count = 4 if alpha is not None else 3
 
     # Profil GTiff intermédiaire : SEULEMENT les options GTiff natives
     profile = {
         "driver": "GTiff",
         "height": height,
         "width": width,
-        "count": 3,
+        "count": band_count,
         "dtype": "uint8",
         "crs": crs,
         "transform": transform,
@@ -396,6 +429,11 @@ def _write_rgb_cog(red, green, blue, transform, crs, dst_path: str) -> None:
         dst.write(red, 1)
         dst.write(green, 2)
         dst.write(blue, 3)
+        if alpha is not None:
+            dst.write(alpha, 4)
+            dst.colorinterp = [
+                ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha,
+            ]
 
     # Profil COG : options valides pour cog_translate
     cog_profile = cog_profiles.get("deflate")
@@ -569,7 +607,26 @@ def generate_sentinel_composites_for_parcel(
     denom = nir + red
     with np.errstate(invalid="ignore", divide="ignore"):
         ndvi = np.where(denom == 0, np.nan, (nir - red) / denom).astype("float32")
-
+    # ------------------------------------------------------------------
+    # 4 bis. Découper sur le polygone réel de la parcelle
+    # Les bandes ont été découpées sur la bbox (rectangle englobant) :
+    # tout ce qui dépasse le polygone est rendu transparent.
+    # ------------------------------------------------------------------
+    geometry = _get_geometry_for_parcel(db, parcel_id)
+    if geometry is not None:
+        try:
+            outside = _build_parcel_mask(geometry, transform, crs, red.shape)
+            rgb_alpha = np.where(outside, 0, 255).astype("uint8")
+            ndvi = np.where(outside, np.nan, ndvi).astype("float32")
+            logger.info(
+                "[Sentinel] Découpe sur le polygone : %d pixels hors parcelle masqués",
+                int(outside.sum()),
+            )
+        except Exception as e:
+            logger.warning("[Sentinel] Découpe sur le polygone impossible : %s", e)
+            rgb_alpha = None
+    else:
+        rgb_alpha = None
     # ------------------------------------------------------------------
     # 5. Écrire les COG + upload B2
     # ------------------------------------------------------------------
@@ -581,9 +638,8 @@ def generate_sentinel_composites_for_parcel(
         rgb_path = os.path.join(tmpdir, "sentinel_rgb.tif")
         ndvi_path = os.path.join(tmpdir, "sentinel_ndvi.tif")
 
-        _write_rgb_cog(rgb[0], rgb[1], rgb[2], transform, crs, rgb_path)
+        _write_rgb_cog(rgb[0], rgb[1], rgb[2], transform, crs, rgb_path, alpha=rgb_alpha)
         _write_single_band_cog(ndvi, transform, crs, ndvi_path, dtype="float32")
-
         suffix = uuid.uuid4().hex[:8]
         rgb_key = (
             f"rasters/farm_{farm_id}/parcel_{parcel_id}/sentinel_rgb/"

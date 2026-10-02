@@ -53,7 +53,7 @@ from app.api.routes.employees import router as employees_router
 from app.api.routes.farm_employees import router as farm_employees_router  # ⬅️ AJOUT
 from app.api.routes.activities import router as activities_router
 from app.api.routes.weather import router as weather_router
-
+from app.api.routes.parcel_analyses import router as parcel_analyses_router
 
 print("🔵 Lancement de l'application FastAPI...")
 
@@ -124,6 +124,9 @@ app.include_router(activities_router, prefix="/api")
 
 print("🔵 Ajout du router weather...")
 app.include_router(weather_router, prefix="/api")
+
+print("🔵 Ajout du router parcel_analyses...")
+app.include_router(parcel_analyses_router, prefix="/api")
 
 # ==================================================================
 # Titiler
