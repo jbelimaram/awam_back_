@@ -163,7 +163,20 @@ def ingest_parcel_indices(parcel_id: int, *, force_refresh: bool = False) -> dic
             result["skipped"],
             result["cached"],
         )
+         # ------------------------------------------------------------------
+        # 3 bis. Diagnostiquer et archiver les cultures de la parcelle
+        # Alimente la règle des deux observations et les notifications.
+        # ------------------------------------------------------------------
+        try:
+            from app.services.crop_monitoring import archive_for_parcel
 
+            result["diagnoses_archived"] = archive_for_parcel(db, parcel_id)
+        except Exception:
+            db.rollback()
+            logger.exception(
+                "⚠️ [ingestion] Archivage du diagnostic impossible (parcel_id=%s)",
+                parcel_id,
+            )
         # ------------------------------------------------------------------
         # 4. Mettre à jour raster_status
         # ------------------------------------------------------------------

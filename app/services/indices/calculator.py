@@ -83,6 +83,25 @@ def calc_ndmi(bands: dict[str, np.ndarray]) -> np.ndarray:
     return normalized_difference(nir, swir1)
 
 
+
+def calc_msi(bands: dict[str, np.ndarray]) -> np.ndarray:
+    """
+    MSI = SWIR1 / NIR  (Moisture Stress Index, Rock et al. 1986)
+
+    Inverse logique du NDMI : il AUGMENTE quand la plante se dessèche.
+    Lu conjointement au NDMI, il confirme un stress hydrique :
+    NDMI qui baisse + MSI qui monte = déficit en eau probable.
+
+    Plage usuelle : [0, 3]
+    - < 1.0  : végétation bien alimentée en eau
+    - 1.0-1.3 : humidité modérée
+    - > 1.5  : stress hydrique marqué
+    """
+    swir1 = bands["B11"]
+    nir = bands["B08"]
+    return safe_divide(swir1, nir)
+
+
 # ======================================================================
 # 3. NDWI — Normalized Difference Water Index (McFeeters 1996)
 # ======================================================================
@@ -312,6 +331,7 @@ def calc_fcover(bands: dict[str, np.ndarray]) -> np.ndarray:
 CALC_FUNCTIONS: dict[str, callable] = {
     "calc_ndvi": calc_ndvi,
     "calc_ndmi": calc_ndmi,
+    "calc_msi": calc_msi,
     "calc_ndwi": calc_ndwi,
     "calc_ndre": calc_ndre,
     "calc_evi": calc_evi,
