@@ -292,8 +292,8 @@ INDICES_REGISTRY: dict[str, IndiceSpec] = {
     # ------------------------------------------------------------------
     "PSRI": IndiceSpec(
         name="PSRI",
-        formula="(B04 - B03) / B06",
-        required_bands=("B03", "B04", "B06"),
+        formula="(B04 - B02) / B06",
+        required_bands=("B02", "B04", "B06"),
         theoretical_min=-1.0,
         theoretical_max=1.0,
         calc_func_name="calc_psri",

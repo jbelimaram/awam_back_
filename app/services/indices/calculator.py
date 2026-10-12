@@ -292,17 +292,21 @@ def calc_si_soil(bands: dict[str, np.ndarray]) -> np.ndarray:
 
 def calc_psri(bands: dict[str, np.ndarray]) -> np.ndarray:
     """
-    PSRI = (RED - GREEN) / REDEDGE2
+    PSRI = (RED - BLUE) / REDEDGE2
+
+    Formule d'origine (Merzlyak 1999) : (R678 - R500) / R750.
+    Sentinel-2 n'a pas de bande à 500 nm : la plus proche est B02 (490 nm),
+    d'où l'adaptation (B04 - B02) / B06.
 
     Plage : [-1, 1] (parfois plus élevé sur sols nus)
     - Détection de la sénescence (jaunissement, maturation).
     - ⚠️ Division par B06 → safe_divide protège.
     """
     red = bands["B04"]
-    green = bands["B03"]
+    blue = bands["B02"]
     rededge2 = bands["B06"]
 
-    numerator = red - green
+    numerator = red - blue
     return safe_divide(numerator, rededge2)
 
 

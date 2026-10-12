@@ -86,6 +86,16 @@ class CropResponse(CropBase):
     model_config = {"from_attributes": True}
 
 
+class VarietyOption(BaseModel):
+    """Une variété proposée, avec son origine pour regrouper la liste."""
+
+    name: str
+    #: "tunisian" | "spanish" | "international"
+    origin: str
+    #: Libellé du groupe affiché dans le formulaire
+    origin_label: str
+
+
 class SpeciesOption(BaseModel):
     """Une espèce du référentiel, pour alimenter la liste déroulante."""
 
@@ -93,6 +103,25 @@ class SpeciesOption(BaseModel):
     label: str
     crop_type: str
     is_orchard: bool = False
+    #: Variétés proposées dans la liste ; vide = saisie libre
+    varieties: list[VarietyOption] = []
+
+
+class CropSuggestions(BaseModel):
+    """
+    Cultures lues sur la parcelle, pour pré-remplir le formulaire.
+
+    `suggested` : espèces reconnues dans le référentiel et pas encore
+                  suivies sur la parcelle (déjà cochées dans le formulaire).
+    `already_active` : espèces déjà suivies : en cours, ou pérennes
+                  récoltées (la plante reste en place après la récolte).
+    `unknown`   : textes non reconnus, affichés pour information.
+    """
+
+    parcel_name: str
+    suggested: list[str] = []
+    already_active: list[str] = []
+    unknown: list[str] = []
 
 
 class CropObservationCreate(BaseModel):

@@ -102,6 +102,14 @@ BAND_NIR = "B08"
 BAND_SCL = "SCL"
 
 S2_REFLECTANCE_SCALE = 10000.0
+
+# Depuis la version de traitement 04.00 (25 janvier 2022), l'ESA ajoute
+# 1000 aux valeurs L2A : réflectance = (valeur - 1000) / 10 000.
+# Les scènes plus anciennes : réflectance = valeur / 10 000.
+S2_BOA_ADD_OFFSET = -1000.0
+S2_OFFSET_FROM_BASELINE = 4.0
+S2_OFFSET_FROM_DATE = "2022-01-25"
+
 DEFAULT_LOOKBACK_DAYS = 90
 
 # Plafond de nuages à la RECHERCHE. Volontairement large : le tri fin se
@@ -187,6 +195,37 @@ def _build_parcel_mask(geometry: dict, transform, crs, shape: tuple[int, int]):
         invert=False,      # True = pixel HORS du polygone
         all_touched=True,  # garde les pixels de bordure
     )
+
+
+def _boa_offset(item) -> float:
+    """
+    Décalage à appliquer aux valeurs brutes de la scène, selon sa version
+    de traitement (propriété `s2:processing_baseline`). Si la version est
+    absente ou illisible, on se fie à la date de la scène.
+    """
+    baseline = item.properties.get("s2:processing_baseline")
+    try:
+        recent = float(baseline) >= S2_OFFSET_FROM_BASELINE
+    except (TypeError, ValueError):
+        scene_day = str(item.properties.get("datetime", ""))[:10]
+        recent = scene_day >= S2_OFFSET_FROM_DATE
+        logger.warning(
+            "[Sentinel] Version de traitement illisible (%r) pour %s : "
+            "décalage déduit de la date (%s)", baseline, item.id, scene_day,
+        )
+    return S2_BOA_ADD_OFFSET if recent else 0.0
+
+
+def _to_reflectance(arr: np.ndarray, offset: float) -> np.ndarray:
+    """
+    Valeurs brutes Sentinel-2 L2A → réflectance de surface (0 à 1).
+
+    Les valeurs légèrement négatives, produites par la correction
+    atmosphérique sur des surfaces très sombres, sont ramenées à 0.
+    Les NaN (pas de donnée, nuages) restent NaN.
+    """
+    reflectance = (arr.astype("float32") + offset) / S2_REFLECTANCE_SCALE
+    return np.maximum(reflectance, 0.0).astype("float32")
 
 
 def _clip_band_to_bbox(
@@ -434,7 +473,12 @@ def _mask_clouds_with_scl(
 
 
 def _reflectance_to_uint8(arr: np.ndarray, gamma: float = 0.9) -> np.ndarray:
-    """Convertit une réflectance Sentinel-2 (0..10000) en uint8 (0..255)."""
+    """
+    Convertit une réflectance Sentinel-2 en uint8 (0..255).
+
+    L'étirement entre les centiles 1 et 99 rend le résultat indépendant
+    de l'échelle des valeurs reçues.
+    """
     valid = arr[np.isfinite(arr) & (arr > 0)]
     if valid.size == 0:
         return np.zeros(arr.shape, dtype=np.uint8)
@@ -620,12 +664,17 @@ def generate_sentinel_composites_for_parcel(
     blue_da = blue_da.rio.reproject_match(red_da, resampling=Resampling.bilinear)
     nir_da = nir_da.rio.reproject_match(red_da, resampling=Resampling.bilinear)
 
-    red = red_da.values[0].astype("float32")
-    green = green_da.values[0].astype("float32")
-    blue = blue_da.values[0].astype("float32")
-    nir = nir_da.values[0].astype("float32")
+    # Valeurs brutes → réflectance (0 à 1), selon la version de traitement
+    offset = _boa_offset(item)
+    red = _to_reflectance(red_da.values[0], offset)
+    green = _to_reflectance(green_da.values[0], offset)
+    blue = _to_reflectance(blue_da.values[0], offset)
+    nir = _to_reflectance(nir_da.values[0], offset)
 
-    logger.info("[Sentinel] Dimensions finales : %s", red.shape)
+    logger.info(
+        "[Sentinel] Dimensions finales : %s (décalage appliqué : %s)",
+        red.shape, offset,
+    )
 
     transform = red_da.rio.transform()
     crs = red_da.rio.crs
@@ -771,6 +820,12 @@ def _download_all_bands(
             bands_dict[band] = da.values[0].astype("float32")
         except Exception as e:
             logger.warning("[Indices] Échec chargement %s : %s", band, e)
+
+    # Valeurs brutes → réflectance (0 à 1), selon la version de traitement.
+    # Les constantes d'EVI, SAVI et MSAVI supposent des réflectances.
+    offset = _boa_offset(item)
+    bands_dict = {b: _to_reflectance(arr, offset) for b, arr in bands_dict.items()}
+    logger.info("[Indices] Bandes converties en réflectance (décalage : %s)", offset)
 
     cloud_mask: np.ndarray | None = None
     try:
@@ -918,9 +973,13 @@ def generate_all_indices_for_parcel(
     target_resolution: float = TARGET_RESOLUTION_M,
     *,
     force_refresh: bool = False,
+    item=None,
 ) -> dict | None:
     """
     Génère les 14 indices spectraux pour une parcelle et insère les stats.
+
+    `item` : scène imposée (recalcul de l'historique). Sans lui, la scène
+    est choisie automatiquement, comme d'habitude.
 
     La scène est choisie sur la part de PARCELLE visible (bande SCL), et
     non sur le taux de nuages de la scène entière : on obtient ainsi
@@ -944,10 +1003,14 @@ def generate_all_indices_for_parcel(
     # ------------------------------------------------------------------
     # 1. Sélection de la scène
     # ------------------------------------------------------------------
-    item, parcel_valid_ratio = _select_usable_scene(db, parcel_id, bbox, lookback_days)
     if item is None:
-        logger.info("[Indices] Aucune scène trouvée pour parcel %s", parcel_id)
-        return None
+        item, parcel_valid_ratio = _select_usable_scene(db, parcel_id, bbox, lookback_days)
+        if item is None:
+            logger.info("[Indices] Aucune scène trouvée pour parcel %s", parcel_id)
+            return None
+    else:
+        parcel_valid_ratio = None
+        logger.info("[Indices] Scène imposée : %s", item.id)
 
     scene_id = item.id
     scene_date_str = item.properties.get("datetime", "")[:10]
@@ -1142,7 +1205,9 @@ def generate_all_indices_for_parcel(
         "scene_id": scene_id,
         "scene_date": scene_date_str,
         "cloud_cover": cloud_cover,
-        "parcel_valid_ratio": round(parcel_valid_ratio, 3),
+        "parcel_valid_ratio": (
+            round(parcel_valid_ratio, 3) if parcel_valid_ratio is not None else None
+        ),
         "inserted": inserted,
         "skipped": len(indices_skipped),
         "cached": False,

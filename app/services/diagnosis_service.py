@@ -32,7 +32,11 @@ from datetime import date
 
 from app.services.agronomy.calendar import get_stage_at, is_cultural_period
 from app.services.agronomy.species import get_species, is_deciduous, stage_label
-from app.services.agronomy.thresholds import get_rule, has_age_specific_rules
+from app.services.agronomy.thresholds import (
+    NOT_EVALUATED,
+    get_rule,
+    has_age_specific_rules,
+)
 
 #: Baisse relative à partir de laquelle une variation est significative
 SIGNIFICANT_DROP = 0.15   # 15 %
@@ -52,6 +56,7 @@ class Indicator:
     #: Écart avec la mesure précédente (None si première observation)
     delta: float | None = None
     #: "low" (sous le seuil) | "normal" | "high" (excellent)
+    #: | "info" (affiché sans verdict, voir NOT_EVALUATED)
     level: str = "normal"
     #: Rappel du seuil, ex. "normal 0,45–0,70"
     threshold_label: str = ""
@@ -144,6 +149,23 @@ def evaluate_indicators(
             continue
 
         before = previous.get(threshold.indice)
+
+        # Indice affiché pour information, sans comparaison au seuil.
+        # Le FCOVER est stocké entre 0 et 1 : affiché en %, comme son unité.
+        if threshold.indice in NOT_EVALUATED:
+            scale = 100.0 if threshold.unit == "%" else 1.0
+            indicators.append(
+                Indicator(
+                    name=threshold.indice,
+                    value=value * scale,
+                    delta=(value - before) * scale if before is not None else None,
+                    level="info",
+                    threshold_label=NOT_EVALUATED[threshold.indice],
+                    unit=threshold.unit,
+                )
+            )
+            continue
+
         indicators.append(
             Indicator(
                 name=threshold.indice,
@@ -178,10 +200,6 @@ def cross_read(indicators: list[Indicator]) -> tuple[str, list[Risk]]:
         ratio = ind.drop_ratio if ind else None
         return ratio is not None and ratio >= threshold
 
-    def rising(name: str) -> bool:
-        ind = by_name.get(name)
-        return ind is not None and ind.delta is not None and ind.delta > 0
-
     def is_low(name: str) -> bool:
         ind = by_name.get(name)
         return ind is not None and ind.level == "low"
@@ -189,24 +207,34 @@ def cross_read(indicators: list[Indicator]) -> tuple[str, list[Risk]]:
     risks: list[Risk] = []
     reading = ""
 
-    # --- Stress hydrique : NDMI qui baisse et MSI qui monte ---------
-    if (is_low("NDMI") or falling("NDMI", SIGNIFICANT_DROP)) and rising("MSI"):
-        reading = "Le NDMI baisse et le MSI monte : stress hydrique probable."
-        risks.append(Risk(
-            severity="alert",
-            diagnosis="Stress hydrique probable",
-            measure="Mesurer l'humidité du sol, le débit et la pression d'irrigation",
-            action="Restaurer une irrigation régulière si le déficit est confirmé",
-        ))
+    # --- Signal hydrique : NDMI bas ou en baisse --------------------
+    # Le MSI n'est PAS une confirmation indépendante : il se déduit du
+    # NDMI, MSI = (1 - NDMI) / (1 + NDMI), et monte mécaniquement dès que
+    # le NDMI baisse. Il n'y a donc qu'un seul signal, qui vaut « à
+    # surveiller » ; c'est sa répétition sur deux images (règle de
+    # confirmation, voir compute_severity) qui le fait passer en alerte.
+    water_signal = is_low("NDMI") or falling("NDMI", SIGNIFICANT_DROP)
 
-    # --- Stress hydrique précoce : NDMI seul, couvert encore stable --
-    elif (is_low("NDMI") or falling("NDMI", SIGNIFICANT_DROP)) and not falling("NDVI"):
-        reading = "Le NDMI baisse alors que le couvert reste stable : stress hydrique précoce."
+    if water_signal and not falling("NDVI"):
+        # On n'affirme que le couvert est stable que si le NDVI est suivi à ce stade
+        reading = (
+            "Le NDMI est bas ou en baisse alors que le couvert reste stable : stress hydrique précoce."
+            if "NDVI" in by_name
+            else "Le NDMI est bas ou en baisse : stress hydrique précoce."
+        )
         risks.append(Risk(
             severity="watch",
             diagnosis="Stress hydrique précoce",
             measure="Contrôler l'humidité du sol avant perte de couvert",
             action="Ajuster l'irrigation progressivement, sans excès",
+        ))
+    elif water_signal:
+        reading = "Le NDMI est bas ou en baisse et le couvert recule : stress hydrique possible."
+        risks.append(Risk(
+            severity="watch",
+            diagnosis="Stress hydrique possible",
+            measure="Mesurer l'humidité du sol, le débit et la pression d'irrigation",
+            action="Restaurer une irrigation régulière si le déficit est confirmé",
         ))
 
     # --- Problème nutritionnel : NDRE baisse, NDMI stable -----------
@@ -230,7 +258,8 @@ def cross_read(indicators: list[Indicator]) -> tuple[str, list[Risk]]:
         ))
 
     # --- Couvert qui recule, hydratation normale --------------------
-    elif falling("NDVI", SIGNIFICANT_DROP) and not falling("NDMI"):
+    # « Hydratation normale » : NDMI ni bas ni en baisse.
+    elif falling("NDVI", SIGNIFICANT_DROP) and not water_signal:
         reading = reading or "Le couvert recule alors que l'hydratation reste normale : cause non hydrique."
         risks.append(Risk(
             severity="watch",
@@ -321,7 +350,7 @@ def diagnose(
     Returns:
         Diagnosis prêt à afficher ou à archiver.
     """
-    period = get_stage_at(species, scene_date)
+    period = get_stage_at(species, scene_date, planting_date)
     stage = period.stage if period else None
     spec = get_species(species)
     age = compute_age_years(planting_date, scene_date)
@@ -332,6 +361,12 @@ def diagnose(
         stage_period=period.label if period else "",
         age_years=round(age, 1) if age is not None else None,
     )
+
+    # Image antérieure à la plantation : elle ne concerne pas cette culture
+    if planting_date is not None and scene_date < planting_date:
+        result.stage_label = "Pas encore plantée"
+        result.reading = "Image antérieure à la date de plantation : pas de diagnostic."
+        return result
 
     if not spec or not stage:
         result.reading = "Espèce non référencée : aucune interprétation possible."
@@ -347,7 +382,7 @@ def diagnose(
     result.age_required = age is None and has_age_specific_rules(species, stage)
 
     # Une baisse pendant une coupe ou une récolte n'est pas une anomalie
-    result.cultural_drop = recent_harvest or is_cultural_period(species, scene_date)
+    result.cultural_drop = recent_harvest or is_cultural_period(species, scene_date, planting_date)
     if result.cultural_drop:
         result.reading = (
             "Période de coupe ou de récolte : les baisses de couvert sont "

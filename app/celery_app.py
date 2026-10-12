@@ -19,6 +19,7 @@ celery_app = Celery(
         "app.tasks.agenda_tasks",
         "app.tasks.parcel_tasks",
         "app.tasks.ingestion_tasks",   # 🆕 14 indices spectraux
+        "app.tasks.weather_tasks",     # 🆕 historique météo
     ],
 )
 
@@ -81,6 +82,8 @@ celery_app.conf.task_routes = {
     "parcels.*": {"queue": "awam_queues:parcelles"},
     "app.tasks.parcel_tasks.*":  {"queue": "awam_queues:parcelles"},
     "app.tasks.ingestion_tasks.*": {"queue": "awam_queues:parcelles"},  # 🆕
+    "weather.*": {"queue": "awam_queues:parcelles"},  # 🆕 météo
+
 }
 
 # ------------------------------------------------------------------
@@ -94,6 +97,16 @@ celery_app.conf.beat_schedule = {
         "task": "app.tasks.agenda_tasks.check_and_send_reminders",
         "schedule": crontab(minute="*/15"),
         "options": {"queue": "awam_queues:agenda"},
+    },
+    
+
+    "sync-weather-daily": {
+        "task": "weather.sync_daily",
+        "schedule": crontab(hour=5, minute=30),
+        "options": {
+            "queue": "awam_queues:parcelles",
+            "expires": 3600,
+        },
     },
 
     # ------------------------------------------------------------------

@@ -13,6 +13,7 @@ from .farm_employee import *
 from app.models.crop import Crop
 from app.models.crop_observation import CropObservation
 from app.models.crop_diagnosis import CropDiagnosis
+from app.models.weather_daily import *
 
 
 __all__ = [

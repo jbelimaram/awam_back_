@@ -10,6 +10,8 @@ Les stades suivent la nomenclature du document agronomique AWAM.
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from dataclasses import dataclass
 from enum import Enum
 
@@ -141,12 +143,13 @@ def list_species() -> list[SpeciesSpec]:
 def stage_label(stage: str) -> str:
     return STAGE_LABELS.get(stage, stage.replace("_", " ").capitalize())
 
+
 def is_orchard(code: str) -> bool:
     """Vrai pour les arbres fruitiers (olivier, amandier, caroubier)."""
     spec = SPECIES.get(code.lower())
     return bool(spec and spec.orchard)
 
-    
+
 def is_deciduous(code: str) -> bool:
     """
     Vrai si l'espèce perd ses feuilles l'hiver. Un NDVI bas en saison
@@ -154,3 +157,167 @@ def is_deciduous(code: str) -> bool:
     """
     spec = SPECIES.get(code.lower())
     return bool(spec and spec.deciduous)
+
+
+# ======================================================================
+# Variétés
+# ======================================================================
+
+
+class VarietyOrigin(str, Enum):
+    """Origine d'une variété, pour regrouper la liste dans le formulaire."""
+
+    TUNISIAN = "tunisian"
+    SPANISH = "spanish"
+    INTERNATIONAL = "international"
+
+
+@dataclass(frozen=True)
+class Variety:
+    name: str
+    origin: VarietyOrigin
+
+
+#: Libellés des groupes, dans l'ordre d'affichage du formulaire
+ORIGIN_LABELS: dict[VarietyOrigin, str] = {
+    VarietyOrigin.TUNISIAN: "Variétés tunisiennes",
+    VarietyOrigin.SPANISH: "Variétés espagnoles",
+    VarietyOrigin.INTERNATIONAL: "Types cultivés",
+}
+
+_TN = VarietyOrigin.TUNISIAN
+_ES = VarietyOrigin.SPANISH
+_INT = VarietyOrigin.INTERNATIONAL
+
+#: Variétés, ou types cultivés, proposés pour chaque espèce.
+#: Pour les plantes aromatiques, il s'agit de types (espèces proches ou
+#: chémotypes) plutôt que de variétés au sens strict : c'est ce qui
+#: détermine le rendement et la qualité de l'huile essentielle.
+#: Une espèce sans liste (caroubier) se saisit librement, et l'option
+#: « Autre » reste toujours possible côté formulaire.
+VARIETIES: dict[str, tuple[Variety, ...]] = {
+    "olivier": (
+        Variety("Chemlali", _TN), Variety("Chétoui", _TN),
+        Variety("Oueslati", _TN), Variety("Zalmati", _TN),
+        Variety("Zarrazi", _TN), Variety("Gerboui", _TN),
+        Variety("Meski", _TN),
+        Variety("Arbequina", _ES), Variety("Arbosana", _ES),
+        Variety("Picual", _ES),
+    ),
+    "amandier": (
+        Variety("Achaak", _TN), Variety("Zahaf", _TN),
+        Variety("Ksontini", _TN), Variety("Blanco", _TN),
+        Variety("Mazetto", _TN),
+    ),
+    "lavande": (
+        Variety("Lavande stoechas", _TN),
+        Variety("Lavande vraie", _INT), Variety("Lavandin Grosso", _INT),
+        Variety("Lavandin Super", _INT),
+    ),
+    "menthe": (
+        Variety("Menthe verte", _TN), Variety("Menthe pouliot", _TN),
+        Variety("Menthe poivrée", _INT),
+    ),
+    "thym": (
+        Variety("Thym à têtes", _TN), Variety("Thym commun", _INT),
+    ),
+    "romarin": (Variety("Romarin officinal", _TN),),
+    "sauge": (Variety("Sauge officinale", _INT),),
+    "geranium": (
+        Variety("Géranium rosat type Bourbon", _INT),
+        Variety("Géranium rosat type Égypte", _INT),
+    ),
+    "basilic": (
+        Variety("Petit basilic", _TN), Variety("Grand vert", _INT),
+    ),
+    "citronnelle": (
+        Variety("Citronnelle de l'Inde", _INT),
+        Variety("Citronnelle de Java", _INT),
+    ),
+    "verveine": (Variety("Verveine odorante", _INT),),
+}
+
+
+def get_varieties(code: str) -> tuple[Variety, ...]:
+    return VARIETIES.get(code.lower(), ())
+
+
+def is_annual(code: str) -> bool:
+    """
+    Vrai pour une culture annuelle (basilic). Après sa récolte, le cycle
+    est terminé : l'espèce peut être déclarée à nouveau sur la parcelle.
+    Une pérenne, elle, reste en place après la récolte.
+    """
+    spec = SPECIES.get(code.lower())
+    return bool(spec and spec.crop_type == CropType.ANNUAL)
+
+
+# ======================================================================
+# Lecture des cultures saisies sur une parcelle
+# ======================================================================
+
+
+def _normalize(text: str) -> str:
+    """Minuscules, sans accents ni espaces superflus."""
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    return re.sub(r"\s+", " ", text).strip().lower()
+
+
+def _build_aliases() -> dict[str, str]:
+    """
+    Toutes les écritures reconnues pour chaque espèce : code, libellé,
+    singulier, pluriel, et le premier mot du libellé (« sauge » pour
+    « Sauge officinale »).
+    """
+    aliases: dict[str, str] = {}
+    for spec in SPECIES.values():
+        for form in {spec.code, spec.label, spec.label.split()[0]}:
+            base = _normalize(form)
+            aliases[base] = spec.code
+            aliases[base + "s"] = spec.code
+            aliases[base + "x"] = spec.code
+    # Écritures courantes du nom du fruit plutôt que de l'arbre
+    aliases.update({
+        "olive": "olivier", "olives": "olivier",
+        "amande": "amandier", "amandes": "amandier",
+        "caroube": "caroubier", "caroubes": "caroubier",
+        "geranium rosat": "geranium", "rose geranium": "geranium",
+        "verveine odorante": "verveine",
+    })
+    return aliases
+
+
+_ALIASES = _build_aliases()
+
+#: Séparateurs acceptés entre deux cultures : , ; / + & et « et »
+_SEPARATORS = re.compile(r"\s*(?:,|;|/|\+|&|\bet\b)\s*", re.IGNORECASE)
+
+
+def parse_cultures(text: str | None) -> tuple[list[str], list[str]]:
+    """
+    Découpe le champ culture d'une parcelle en espèces du référentiel.
+
+    "Olivier, Lavande"   → (["olivier", "lavande"], [])
+    "oliviers + thym"    → (["olivier", "thym"], [])
+    "Olivier et figuier" → (["olivier"], ["figuier"])
+
+    Returns:
+        (codes reconnus sans doublon, textes non reconnus)
+    """
+    if not text or not text.strip():
+        return [], []
+
+    found: list[str] = []
+    unknown: list[str] = []
+    for part in _SEPARATORS.split(text):
+        part = part.strip()
+        if not part:
+            continue
+        code = _ALIASES.get(_normalize(part))
+        if code:
+            if code not in found:
+                found.append(code)
+        else:
+            unknown.append(part)
+    return found, unknown

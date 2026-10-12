@@ -22,14 +22,25 @@ from app.models.parcel import Parcel
 from app.models.utilisateur import User
 from app.schemas.crop import (
     CropCreate,
+    CropSuggestions,
     CropObservationCreate,
     CropObservationResponse,
     CropResponse,
     CropUpdate,
     SpeciesOption,
+    VarietyOption,
 )
 from app.services.agronomy.calendar import expected_harvest_date, get_stage_at
-from app.services.agronomy.species import SPECIES, is_orchard, list_species, stage_label
+from app.services.agronomy.species import (
+    ORIGIN_LABELS,
+    SPECIES,
+    get_varieties,
+    is_annual,
+    is_orchard,
+    list_species,
+    parse_cultures,
+    stage_label,
+)
 
 router = APIRouter(tags=["crops"])
 
@@ -147,9 +158,53 @@ def list_available_species():
         SpeciesOption(
             code=s.code, label=s.label, crop_type=s.crop_type.value,
             is_orchard=s.orchard,
+            varieties=[
+                VarietyOption(
+                    name=v.name,
+                    origin=v.origin.value,
+                    origin_label=ORIGIN_LABELS[v.origin],
+                )
+                for v in get_varieties(s.code)
+            ],
         )
         for s in list_species()
     ]
+
+
+@router.get("/parcels/{parcel_id}/crop-suggestions", response_model=CropSuggestions)
+def get_crop_suggestions(
+    parcel_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Espèces à pré-cocher dans le formulaire, lues sur la parcelle.
+
+    Une parcelle peut porter plusieurs cultures : le champ culture est
+    découpé et chaque élément retrouvé dans le référentiel.
+
+    Une espèce n'est pas reproposée si elle est déjà suivie :
+      - culture en cours ;
+      - ou pérenne récoltée : la plante reste en place après la récolte.
+    Une annuelle récoltée (basilic) est reproposée : son cycle est fini.
+    Une culture abandonnée libère toujours l'espèce.
+    """
+    parcel = _get_owned_parcel(parcel_id, user, db)
+    found, unknown = parse_cultures(parcel.culture_type)
+
+    active = {
+        c.species
+        for c in db.query(Crop).filter(Crop.parcel_id == parcel_id).all()
+        if c.status == "active"
+        or (c.status == "harvested" and not is_annual(c.species))
+    }
+
+    return CropSuggestions(
+        parcel_name=parcel.name,
+        suggested=[code for code in found if code not in active],
+        already_active=sorted(active),
+        unknown=unknown,
+    )
 
 
 # ----------------------------------------------------------------------
@@ -297,7 +352,7 @@ def create_observation(
     crop = _get_owned_crop(crop_id, user, db)
 
     observed_at = payload.observed_at or datetime.now(timezone.utc)
-    period = get_stage_at(crop.species, observed_at.date())
+    period = get_stage_at(crop.species, observed_at.date(), crop.planting_date)
 
     observation = CropObservation(
         crop_id=crop_id,
