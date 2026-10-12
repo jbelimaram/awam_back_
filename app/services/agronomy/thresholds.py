@@ -113,6 +113,32 @@ DEFAULT_RULE = StageRule(
 )
 
 
+#: Indices AFFICHÉS mais NON comparés à leur seuil, avec la raison
+#: montrée à l'utilisateur. Les seuils du document restent écrits dans
+#: RULES, pour la traçabilité, et seront réactivés une fois clarifiés.
+#:
+#: FCOVER : le document donne des seuils de fraction de couvert réelle
+#: (en %), alors qu'AWAM calcule le FCOVER comme une transformation
+#: linéaire du NDVI, (NDVI - 0,1) / 0,8. Les deux ne sont pas comparables :
+#: pour un olivier adulte, un NDVI normal (0,45 à 0,70) donne un FCOVER
+#: de 44 à 75 %, quand le document attend 65 à 85 %. Le comparer au seuil
+#: produisait donc des alertes contradictoires avec le NDVI. En attente
+#: de la définition exacte retenue par l'agronome.
+#:
+#: MSI : il se déduit exactement du NDMI, MSI = (1 - NDMI) / (1 + NDMI),
+#: car les deux utilisent les mêmes bandes (B08 et B11). Leurs seuils du
+#: document se contredisent : un NDMI normal (0,15 à 0,35) correspond à
+#: un MSI de 0,48 à 0,74, jugé « excellent », et un MSI normal (1,00 à
+#: 1,30) correspond à un NDMI de 0 à -0,13, jugé en stress. Aucune
+#: parcelle ne pouvait donc être normale sur les deux. Le NDMI, présent
+#: dans toutes les règles hydriques, reste seul évalué, en attendant que
+#: l'agronome harmonise les deux intervalles.
+NOT_EVALUATED: dict[str, str] = {
+    "FCOVER": "non évalué : définition à préciser avec l'agronome",
+    "MSI": "non évalué : redondant avec le NDMI, seuils à harmoniser avec l'agronome",
+}
+
+
 RULES: dict[str, tuple[StageRule, ...]] = {
 
     # ==================================================================

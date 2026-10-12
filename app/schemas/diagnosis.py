@@ -7,7 +7,8 @@ from pydantic import BaseModel
 #:   low    — sous l'intervalle attendu (anomalie à vérifier)
 #:   normal — dans l'intervalle attendu
 #:   high   — au-dessus : développement excellent (pas une alerte)
-Level = Literal["low", "normal", "high"]
+#:   info   — affiché sans verdict (seuil en attente de clarification)
+Level = Literal["low", "normal", "high", "info"]
 
 #: Niveaux des références de sol (inchangés)
 SoilLevel = Literal["green", "yellow", "red"]
