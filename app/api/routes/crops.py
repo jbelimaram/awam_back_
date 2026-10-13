@@ -22,6 +22,8 @@ from app.models.parcel import Parcel
 from app.models.utilisateur import User
 from app.schemas.crop import (
     CropCreate,
+    ExpectedHarvestPreview,
+    check_crop_dates,
     CropSuggestions,
     CropObservationCreate,
     CropObservationResponse,
@@ -171,6 +173,36 @@ def list_available_species():
     ]
 
 
+@router.get("/crops/expected-harvest", response_model=ExpectedHarvestPreview)
+def preview_expected_harvest(
+    species: str,
+    planting_date: date,
+    in_production: bool = False,
+    user: User = Depends(get_current_user),
+):
+    """
+    Récolte prévue pour une espèce et une date de plantation, AVANT
+    l'enregistrement : le formulaire l'affiche dès la saisie. Même calcul
+    que celui appliqué à l'enregistrement (_compute_expected_harvest).
+    """
+    code = species.strip().lower()
+    if code not in SPECIES:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Espèce inconnue.")
+
+    orchard = is_orchard(code)
+    result = expected_harvest_date(
+        code, planting_date, orchard=orchard, in_production=in_production
+    )
+    reason = None
+    if result is None:
+        reason = (
+            "Verger pas encore en production : pas de récolte prévue."
+            if orchard and not in_production
+            else "Pas de période de récolte connue pour cette espèce."
+        )
+    return ExpectedHarvestPreview(expected_harvest_date=result, reason=reason)
+
+
 @router.get("/parcels/{parcel_id}/crop-suggestions", response_model=CropSuggestions)
 def get_crop_suggestions(
     parcel_id: int,
@@ -288,6 +320,15 @@ def update_crop(
 
     if not is_orchard(crop.species):
         crop.in_production = False
+
+    # Cohérence des dates sur l'état FINAL de la culture, après le recalcul
+    # de la récolte prévue : une modification partielle doit rester
+    # compatible avec les dates déjà enregistrées.
+    try:
+        check_crop_dates(crop.planting_date, crop.expected_harvest_date, crop.actual_harvest_date)
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e))
 
     db.commit()
     db.refresh(crop)

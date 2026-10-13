@@ -20,6 +20,7 @@ celery_app = Celery(
         "app.tasks.parcel_tasks",
         "app.tasks.ingestion_tasks",   # 🆕 14 indices spectraux
         "app.tasks.weather_tasks",     # 🆕 historique météo
+        "app.tasks.history_tasks",     # 🆕 historique Sentinel-2 sur 3 ans
     ],
 )
 
@@ -57,12 +58,27 @@ celery_app.conf.timezone = "Africa/Tunis"
 celery_app.conf.enable_utc = False
 
 # ------------------------------------------------------------------
-# 3 QUEUES SÉPARÉES
+# 4 QUEUES SÉPARÉES
+#
+# « historique » : tâches longues (3 ans d'images par parcelle). Elle a
+# son PROPRE worker, pour ne jamais bloquer les indices du jour :
+#
+#   Worker principal (n'écoute PAS l'historique) :
+#     celery -A app.celery_app worker --pool=solo -n principal@%h
+#            -Q awam_queues:agenda,awam_queues:parcelles,awam_queues:alertes
+#
+#   Worker historique :
+#     celery -A app.celery_app worker --pool=solo -n historique@%h
+#            -Q awam_queues:historique
+#
+# ⚠️  Sans l'option -Q, un worker écoute TOUTES les files, y compris
+#     l'historique : il faut donc la préciser sur le worker principal.
 # ------------------------------------------------------------------
 celery_app.conf.task_queues = {
-    "awam_queues:agenda":    {"exchange": "awam_queues:agenda",    "routing_key": "awam_queues:agenda"},
-    "awam_queues:parcelles": {"exchange": "awam_queues:parcelles", "routing_key": "awam_queues:parcelles"},
-    "awam_queues:alertes":   {"exchange": "awam_queues:alertes",   "routing_key": "awam_queues:alertes"},
+    "awam_queues:agenda":     {"exchange": "awam_queues:agenda",     "routing_key": "awam_queues:agenda"},
+    "awam_queues:parcelles":  {"exchange": "awam_queues:parcelles",  "routing_key": "awam_queues:parcelles"},
+    "awam_queues:alertes":    {"exchange": "awam_queues:alertes",    "routing_key": "awam_queues:alertes"},
+    "awam_queues:historique": {"exchange": "awam_queues:historique", "routing_key": "awam_queues:historique"},
 }
 
 celery_app.conf.task_default_queue = "awam_queues:parcelles"
@@ -83,6 +99,7 @@ celery_app.conf.task_routes = {
     "app.tasks.parcel_tasks.*":  {"queue": "awam_queues:parcelles"},
     "app.tasks.ingestion_tasks.*": {"queue": "awam_queues:parcelles"},  # 🆕
     "weather.*": {"queue": "awam_queues:parcelles"},  # 🆕 météo
+    "history.*": {"queue": "awam_queues:historique"},  # 🆕 historique, worker dédié
 
 }
 

@@ -294,7 +294,12 @@ def expected_harvest_date(
 
     La date renvoyée n'est jamais dans le passé : pour un verger planté
     depuis longtemps, c'est la prochaine période de récolte.
+
+    Sans date de plantation : None. La récolte prévue dépend de la
+    plantation ; partir de la date du jour donnerait une date sans fondement.
     """
+    if planting_date is None:
+        return None
     period = first_harvest_period(species, planting_date)
     if period is None:
         return None
@@ -302,7 +307,7 @@ def expected_harvest_date(
         return None
 
     today = today or date.today()
-    reference = max(planting_date, today) if planting_date else today
+    reference = max(planting_date, today)
 
     # Période en cours (ex. octobre pour une récolte octobre-décembre) :
     # on propose son début, la récolte est imminente ou en cours.
