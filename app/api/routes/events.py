@@ -113,3 +113,4 @@ async def stream_events(request: Request, user: User = Depends(get_current_user)
             # Empêche un éventuel proxy de retenir les messages
             "X-Accel-Buffering": "no",
         },
+    )
