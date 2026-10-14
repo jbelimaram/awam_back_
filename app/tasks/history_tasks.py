@@ -36,6 +36,7 @@ from sqlalchemy import text
 
 from app.db.database import SessionLocal
 from app.services import history_service as hs
+from app.services.events import publish_parcel_event
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,9 @@ def ingest_history_batch(parcel_id: int, dates: list[str]) -> dict:
         if not _parcel_exists(db, parcel_id):
             return {"parcel_id": parcel_id, "skipped": "parcelle supprimée"}
         result = hs.process_dates(db, parcel_id, dates)
+        # Prévient les pages ouvertes : la plage habituelle se recalcule
+        if result.inserted:
+            publish_parcel_event(parcel_id, "history")
         logger.info(
             "[Historique] Parcelle %s : lot de %s dates · %s enregistrées · %s nuageuses · %s échecs",
             parcel_id, len(dates), result.inserted, result.cloudy, result.failed,

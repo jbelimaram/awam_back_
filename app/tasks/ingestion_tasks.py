@@ -21,6 +21,7 @@ import logging
 
 from sqlalchemy import text
 
+from app.services.events import publish_parcel_event
 from app.db.database import SessionLocal
 from app.services.sentinel_service import (
     generate_all_indices_for_parcel,
@@ -200,6 +201,7 @@ def ingest_parcel_indices(parcel_id: int, *, force_refresh: bool = False) -> dic
                 db.commit()
             except Exception:
                 db.rollback()
+            publish_parcel_event(parcel_id, "indices", scene_date=None)
             return result
 
         # ------------------------------------------------------------------
@@ -250,6 +252,8 @@ def ingest_parcel_indices(parcel_id: int, *, force_refresh: bool = False) -> dic
                 parcel_id,
             )
 
+        # Prévient les pages ouvertes : la courbe se met à jour seule
+        publish_parcel_event(parcel_id, "indices", scene_date=result["scene_date"])
         return result
 
     except Exception as e:
@@ -262,6 +266,7 @@ def ingest_parcel_indices(parcel_id: int, *, force_refresh: bool = False) -> dic
             db.commit()
         except Exception:
             db.rollback()
+        publish_parcel_event(parcel_id, "failed")
         return result
 
     finally:

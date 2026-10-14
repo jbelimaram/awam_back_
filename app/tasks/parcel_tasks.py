@@ -16,6 +16,7 @@ from datetime import date as date_type
 
 from sqlalchemy import text
 
+from app.services.events import publish_parcel_event
 from app.db.database import SessionLocal
 from app.services.rasterizer import rasterize_parcel
 from app.services.sentinel_service import generate_sentinel_composites_for_parcel
@@ -209,6 +210,9 @@ def generate_parcel_rasters(parcel_id: int) -> dict:
         except Exception:
             db.rollback()
             logger.exception("⚠️ [task] Échec de la mise à jour de raster_status (parcel_id=%s)", parcel_id)
+
+        # Prévient les pages ouvertes : la carte recharge son image
+        publish_parcel_event(parcel_id, "failed" if has_error else "rasters")
 
         if has_error:
             logger.warning(
