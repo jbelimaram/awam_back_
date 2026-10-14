@@ -24,6 +24,7 @@ from app.schemas.crop import (
     CropCreate,
     ExpectedHarvestPreview,
     check_crop_dates,
+    check_harvest,
     CropSuggestions,
     CropObservationCreate,
     CropObservationResponse,
@@ -136,6 +137,8 @@ def _to_response(crop: Crop) -> CropResponse:
         planting_date=crop.planting_date,
         expected_harvest_date=crop.expected_harvest_date,
         actual_harvest_date=crop.actual_harvest_date,
+        actual_yield=crop.actual_yield,
+        yield_unit=crop.yield_unit,
         density=crop.density,
         in_production=bool(crop.in_production),
         is_orchard=is_orchard(crop.species),
@@ -292,6 +295,9 @@ def create_crop(
         crop.in_production = False
     if not manual_expected:
         _compute_expected_harvest(crop)
+    # Culture abandonnée : elle ne sera jamais récoltée
+    if crop.status == "abandoned":
+        crop.expected_harvest_date = None
 
     db.add(crop)
     db.commit()
@@ -321,11 +327,17 @@ def update_crop(
     if not is_orchard(crop.species):
         crop.in_production = False
 
-    # Cohérence des dates sur l'état FINAL de la culture, après le recalcul
-    # de la récolte prévue : une modification partielle doit rester
-    # compatible avec les dates déjà enregistrées.
+    # Culture abandonnée : elle ne sera jamais récoltée
+    if crop.status == "abandoned":
+        crop.expected_harvest_date = None
+
+    # Cohérence sur l'état FINAL de la culture, après le recalcul de la
+    # récolte prévue : une modification partielle doit rester compatible
+    # avec ce qui est déjà enregistré. Une culture récoltée doit porter sa
+    # date et sa production réelles.
     try:
         check_crop_dates(crop.planting_date, crop.expected_harvest_date, crop.actual_harvest_date)
+        check_harvest(crop.status, crop.actual_harvest_date, crop.actual_yield, crop.yield_unit)
     except ValueError as e:
         db.rollback()
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e))
