@@ -108,6 +108,20 @@ celery_app.conf.task_routes = {
 # ------------------------------------------------------------------
 celery_app.conf.beat_schedule = {
     # ------------------------------------------------------------------
+    # Historique : toutes les heures (à h15), les parcelles actives sans
+    # historique sont repérées et leur historique lancé. Tâche légère
+    # (une requête), sur le worker historique.
+    # ------------------------------------------------------------------
+    "history-check-missing": {
+        "task": "history.check_missing",
+        "schedule": crontab(minute=15),
+        "options": {
+            "queue": "awam_queues:historique",
+            "expires": 3000,
+        },
+    },
+
+    # ------------------------------------------------------------------
     # Rappels d'agenda (existant) — toutes les 15 min
     # ------------------------------------------------------------------
     "check-agenda-reminders": {
@@ -127,12 +141,19 @@ celery_app.conf.beat_schedule = {
     },
 
     # ------------------------------------------------------------------
-    # 🆕 Ingestion quotidienne des 14 indices spectraux
-    #    Tous les jours à 6h du matin (heure Tunis)
+    # Recherche des nouvelles images et calcul des 15 indices
+    # Toutes les 3 heures, de 6h à 21h (6h, 9h, 12h, 15h, 18h, 21h, heure
+    # de Tunis) : une image publiée dans la journée apparaît au plus tard
+    # 3 heures après, sans attendre le lendemain.
+    #
+    # Sans nouvelle image, rien n'est retéléchargé : la scène déjà en base
+    # est reconnue et ignorée. Les diagnostics ne sont pas dupliqués (une
+    # ligne par culture et par date d'image), et l'image de la carte n'est
+    # régénérée que si elle est plus ancienne que les indices.
     # ------------------------------------------------------------------
     "ingest-parcel-indices-daily": {
         "task": "parcels.ingest_all_active_parcels",
-        "schedule": crontab(hour=6, minute=0),
+        "schedule": crontab(minute=0, hour="6-21/3"),
         "options": {
             "queue": "awam_queues:parcelles",
             "expires": 3600,  # expire après 1h si pas exécutée (évite l'accumulation)

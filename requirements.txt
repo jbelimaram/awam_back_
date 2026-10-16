@@ -51,3 +51,6 @@ httpx
 requests_aws4auth
 
 shapely
+
+planetary-computer
+pystac-client

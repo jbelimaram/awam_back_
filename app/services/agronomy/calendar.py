@@ -34,7 +34,7 @@ DATE DE PLANTATION — elle est prise en compte de deux façons :
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 
 from app.services.agronomy.species import CropType, get_species
 
@@ -275,6 +275,24 @@ def first_harvest_period(species: str, planting_date: date | None = None) -> Sta
     return None
 
 
+def _next_harvest_start(periods: list[StagePeriod], ref: date) -> date:
+    """
+    Prochaine date de récolte à partir de `ref`. Si `ref` tombe dans une
+    saison de récolte, c'est `ref` lui-même : la plante est prête et la
+    saison est ouverte. Sinon, le début de la saison suivante. Plusieurs
+    saisons possibles (ex. géranium).
+    """
+    candidates = []
+    for period in periods:
+        if period.covers(ref.month):
+            candidates.append(ref)
+        elif period.start_month > ref.month:
+            candidates.append(date(ref.year, period.start_month, 1))
+        else:
+            candidates.append(date(ref.year + 1, period.start_month, 1))
+    return min(candidates)
+
+
 def expected_harvest_date(
     species: str,
     planting_date: date | None,
@@ -284,34 +302,42 @@ def expected_harvest_date(
     today: date | None = None,
 ) -> date | None:
     """
-    Date de récolte prévue, calculée depuis le calendrier agronomique.
+    Date de récolte prévue, calculée À PARTIR DE LA DATE DE PLANTATION.
 
-    - Cultures récoltées dès la première saison (aromatiques, basilic) :
-      première période de récolte qui suit la plantation.
-    - Arbres fruitiers : uniquement si le verger est en production. Sinon
-      None — le système n'invente pas une date de première récolte, qui
-      varie selon la variété, le greffage et l'irrigation.
+    - Culture annuelle (basilic) : plantation + délai avant la première
+      récolte (app/services/agronomy/species.py, FIRST_HARVEST_DELAYS).
+    - Plante pérenne : plantation + délai avant la première récolte, puis
+      première saison de récolte de l'espèce à partir de cette date. Si
+      cette date est déjà passée (plante adulte), c'est la prochaine saison
+      à partir d'aujourd'hui : une plante pérenne se récolte chaque année.
+      Une jeune plantation est donc récoltée plus tard qu'une plante adulte.
+    - Arbre fruitier : uniquement si le verger est en production (case
+      saisie par l'utilisateur), prochaine saison de récolte. Sinon None :
+      le système n'invente pas une année de première récolte.
 
-    La date renvoyée n'est jamais dans le passé : pour un verger planté
-    depuis longtemps, c'est la prochaine période de récolte.
-
-    Sans date de plantation : None. La récolte prévue dépend de la
-    plantation ; partir de la date du jour donnerait une date sans fondement.
+    Sans date de plantation : None.
     """
     if planting_date is None:
         return None
-    period = first_harvest_period(species, planting_date)
-    if period is None:
-        return None
-    if orchard and not in_production:
-        return None
-
     today = today or date.today()
-    reference = max(planting_date, today)
 
-    # Période en cours (ex. octobre pour une récolte octobre-décembre) :
-    # on propose son début, la récolte est imminente ou en cours.
-    year = reference.year
-    if not period.covers(reference.month) and reference.month > period.start_month:
-        year += 1
-    return date(year, period.start_month, 1)
+    if orchard:
+        if not in_production:
+            return None
+        periods = [p for p in get_periods(species, None) if p.stage in HARVEST_STAGES]
+        return _next_harvest_start(periods, max(planting_date, today)) if periods else None
+
+    from app.services.agronomy.species import first_harvest_delay, is_annual
+
+    delay = first_harvest_delay(species)
+    earliest = planting_date + timedelta(days=delay.days if delay else 0)
+
+    # Culture annuelle : la date découle directement de la plantation
+    if is_annual(species):
+        return earliest
+
+    periods = [p for p in get_periods(species, None) if p.stage in HARVEST_STAGES]
+    if not periods:
+        return None
+    # Jamais avant la date au plus tôt, ni dans une saison déjà passée
+    return _next_harvest_start(periods, max(earliest, today))
