@@ -45,6 +45,9 @@ from app.api.routes.dashboard import router as dashboard_router
 from app.api.routes.raster import router as raster_router
 from app.api.routes.farms import router as farm_router
 from titiler.core.factory import TilerFactory
+from fastapi import Depends
+from app.core.security import get_current_user
+from app.services.cog_access import b2_cog_url
 from titiler.core.errors import DEFAULT_STATUS_CODES, add_exception_handlers
 from app.api.routes.agenda import router as agenda_router
 from app.api.routes.indices import router as indices_router
@@ -147,8 +150,16 @@ print("🔵 Ajout des handlers d'exception titiler...")
 add_exception_handlers(app, DEFAULT_STATUS_CODES)
 
 print("🔵 Ajout du router titiler (COG)...")
-cog = TilerFactory()
-app.include_router(cog.router, prefix="/cog", tags=["COG"])
+# Routes /cog/… protégées (voir app/services/cog_access.py) :
+#   - authentification obligatoire ;
+#   - seules les images du bucket B2 du projet peuvent être lues.
+cog = TilerFactory(path_dependency=b2_cog_url)
+app.include_router(
+    cog.router,
+    prefix="/cog",
+    tags=["COG"],
+    dependencies=[Depends(get_current_user)],
+)
 
 print("✅ Application prête !")
 
