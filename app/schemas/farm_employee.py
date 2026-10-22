@@ -24,6 +24,8 @@ class FarmEmployeeCreate(BaseModel):
 class FarmEmployeeUpdate(BaseModel):
     role: Optional[str] = None
     is_active: Optional[bool] = None
+    #: Code du type de tâche de l'équipe ; null = sans équipe
+    team: Optional[str] = None
 
     @field_validator("role")
     @classmethod
@@ -41,6 +43,8 @@ class FarmEmployeeResponse(BaseModel):
     role: Optional[str] = None
     hired_at: Optional[datetime] = None
     is_active: bool
+    #: Équipe dans cette ferme (code d'un type de tâche), None si sans équipe
+    team: Optional[str] = None
     employee: EmployeeResponse
 
     class Config:

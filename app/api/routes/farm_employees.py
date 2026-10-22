@@ -19,6 +19,7 @@ from app.models.utilisateur import User
 from app.models.farm import Farm
 from app.models.farm_employee import FarmEmployee
 from app.models.employee import Employee
+from app.services.task_types import is_valid_code
 from app.schemas.farm_employee import (
     FarmEmployeeCreate,
     FarmEmployeeUpdate,
@@ -117,6 +118,10 @@ async def update_farm_employee(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Affectation introuvable.")
 
     update_data = payload.model_dump(exclude_unset=True)
+    # Équipe : un type de tâche existant du compte, ou vide (sans équipe)
+    if update_data.get("team"):
+        if not is_valid_code(db, user.id, update_data["team"]):
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Équipe inconnue.")
     for field, value in update_data.items():
         setattr(link, field, value)
 

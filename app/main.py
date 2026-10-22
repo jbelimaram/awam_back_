@@ -60,6 +60,7 @@ from app.api.routes.parcel_analyses import router as parcel_analyses_router
 from app.api.routes.crops import router as crops_router
 from app.api.routes.diagnosis import router as diagnosis_router
 from app.api.routes.events import router as events_router
+from app.api.routes.task_types import router as task_types_router
 
 print("🔵 Lancement de l'application FastAPI...")
 
@@ -141,6 +142,8 @@ print("🔵 Ajout du router diagnosis...")
 app.include_router(diagnosis_router, prefix="/api")
 
 print("🔵 Ajout du router events...")
+app.include_router(events_router, prefix="/api")
+
 app.include_router(events_router, prefix="/api")
 
 # ==================================================================
