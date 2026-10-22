@@ -1,3 +1,14 @@
+"""
+Rattachement des employés aux fermes : QUI travaille sur QUELLE ferme,
+avec QUEL rôle (« coordinateur » ou « membre »).
+
+Règles :
+  - la ferme doit appartenir au compte connecté ;
+  - l'employé aussi : on ne rattache jamais l'employé d'un autre compte ;
+  - UN SEUL coordinateur par ferme : en désigner un nouveau fait
+    automatiquement repasser l'ancien en « membre ».
+"""
+
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -16,12 +27,28 @@ from app.schemas.farm_employee import (
 
 router = APIRouter(prefix="/farms", tags=["farm-employees"])
 
+COORDINATOR = "coordinateur"
+MEMBER = "membre"
+
 
 def _get_owned_farm(farm_id: int, user: User, db: Session) -> Farm:
     farm = db.query(Farm).filter(Farm.id == farm_id, Farm.user_id == user.id).first()
     if not farm:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ferme introuvable.")
     return farm
+
+
+def _keep_single_coordinator(db: Session, farm_id: int, coordinator_link_id: int) -> None:
+    """Un seul coordinateur par ferme : les autres repassent « membre »."""
+    (
+        db.query(FarmEmployee)
+        .filter(
+            FarmEmployee.farm_id == farm_id,
+            FarmEmployee.role == COORDINATOR,
+            FarmEmployee.id != coordinator_link_id,
+        )
+        .update({FarmEmployee.role: MEMBER}, synchronize_session=False)
+    )
 
 
 @router.get("/{farm_id}/employees", response_model=List[FarmEmployeeResponse])
@@ -48,7 +75,12 @@ async def add_farm_employee(
 ):
     _get_owned_farm(farm_id, user, db)
 
-    employee = db.query(Employee).filter(Employee.id == payload.employee_id).first()
+    # Seuls les employés du compte peuvent être rattachés à ses fermes
+    employee = (
+        db.query(Employee)
+        .filter(Employee.id == payload.employee_id, Employee.user_id == user.id)
+        .first()
+    )
     if not employee:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Employé introuvable.")
 
@@ -62,6 +94,9 @@ async def add_farm_employee(
 
     link = FarmEmployee(farm_id=farm_id, employee_id=payload.employee_id, role=payload.role)
     db.add(link)
+    db.flush()
+    if link.role == COORDINATOR:
+        _keep_single_coordinator(db, farm_id, link.id)
     db.commit()
     db.refresh(link)
     return link
@@ -85,6 +120,8 @@ async def update_farm_employee(
     for field, value in update_data.items():
         setattr(link, field, value)
 
+    if link.role == COORDINATOR:
+        _keep_single_coordinator(db, farm_id, link.id)
     db.commit()
     db.refresh(link)
     return link

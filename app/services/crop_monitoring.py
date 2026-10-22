@@ -7,8 +7,17 @@ de diagnostic, qui lui ne fait aucun accès en base.
 L'archivage dans `crop_diagnosis` est ce qui permet :
   - la règle des deux observations consécutives (une anomalie n'est
     confirmée qu'à la seconde image) ;
-  - les notifications, qui ne partent que sur anomalie confirmée ;
+  - les alertes, qui ne partent que sur anomalie confirmée ;
   - l'historique des performances au fil des saisons.
+
+INTERPRÉTATION DES ANALYSES — les indices de chaque date sont déjà
+calculés (indice_reading). Ce module les INTERPRÈTE : il ne télécharge
+aucune image et ne recalcule aucun indice. À chaque passage, toutes les
+dates d'analyse des INTERPRETATION_WINDOW_DAYS derniers jours qui n'ont
+pas encore été interprétées pour une culture le sont, de la plus ancienne
+à la plus récente : la règle des deux images exige que la date précédente
+soit interprétée avant la suivante. Le système se rattrape donc tout seul
+(premier passage, worker arrêté, plusieurs images entre deux passages).
 """
 
 from __future__ import annotations
@@ -23,6 +32,7 @@ from sqlalchemy.orm import Session
 from app.models.activity import Activity
 from app.models.crop import Crop
 from app.models.crop_diagnosis import CropDiagnosis
+from app.services.alert_service import sync_alert
 from app.services.diagnosis_service import Diagnosis, diagnose
 
 logger = logging.getLogger(__name__)
@@ -30,6 +40,9 @@ logger = logging.getLogger(__name__)
 #: Une récolte de moins de 30 jours explique encore une baisse de couvert
 HARVEST_WINDOW_DAYS = 30
 HARVEST_TYPES = {"recolte", "récolte", "harvest", "coupe"}
+
+#: Fenêtre des analyses interprétées à chaque passage, en jours
+INTERPRETATION_WINDOW_DAYS = 30
 
 
 @dataclass
@@ -62,21 +75,38 @@ def latest_scene(db: Session, parcel_id: int, before: date | None = None) -> Sce
     ).fetchone()
     if not row or not row.d:
         return SceneValues(None, {}, None)
+    return scene_at(db, parcel_id, row.d)
 
+
+def scene_at(db: Session, parcel_id: int, scene_date: date) -> SceneValues:
+    """Valeurs des indices, déjà calculés, de l'analyse d'une date."""
     rows = db.execute(
         text("""
             SELECT indice_name, value, valid_ratio FROM indice_reading
             WHERE parcel_id = :pid AND scene_date = :d AND value IS NOT NULL
         """),
-        {"pid": parcel_id, "d": row.d},
+        {"pid": parcel_id, "d": scene_date},
     ).fetchall()
 
     ratios = [r.valid_ratio for r in rows if r.valid_ratio is not None]
     return SceneValues(
-        scene_date=row.d,
+        scene_date=scene_date,
         values={r.indice_name: r.value for r in rows},
         valid_ratio=min(ratios) if ratios else None,
     )
+
+
+def analysis_dates(db: Session, parcel_id: int, since: date) -> list[date]:
+    """Dates des analyses valides de la parcelle depuis `since`, dans l'ordre."""
+    rows = db.execute(
+        text("""
+            SELECT DISTINCT scene_date FROM indice_reading
+            WHERE parcel_id = :pid AND is_valid IS NOT FALSE AND scene_date >= :since
+            ORDER BY scene_date
+        """),
+        {"pid": parcel_id, "since": since},
+    ).fetchall()
+    return [r.scene_date for r in rows]
 
 
 def has_recent_harvest(db: Session, crop: Crop, reference: date) -> bool:
@@ -104,12 +134,25 @@ def previous_severity(db: Session, crop_id: int, scene_date: date | None) -> str
 def run_diagnosis(db: Session, crop: Crop) -> tuple[Diagnosis, SceneValues]:
     """Diagnostic de la culture sur la dernière image disponible."""
     current = latest_scene(db, crop.parcel_id)
-    reference = current.scene_date or date.today()
-    previous = (
-        latest_scene(db, crop.parcel_id, before=current.scene_date)
-        if current.scene_date else SceneValues(None, {}, None)
-    )
+    if current.scene_date is not None:
+        return run_diagnosis_at(db, crop, current.scene_date)
+    return _diagnose(db, crop, current, SceneValues(None, {}, None))
 
+
+def run_diagnosis_at(db: Session, crop: Crop, scene_date: date) -> tuple[Diagnosis, SceneValues]:
+    """
+    Interprète l'analyse d'UNE date : ses indices sont comparés aux seuils
+    et à l'analyse précédente, sans rien recalculer.
+    """
+    current = scene_at(db, crop.parcel_id, scene_date)
+    previous = latest_scene(db, crop.parcel_id, before=scene_date)
+    return _diagnose(db, crop, current, previous)
+
+
+def _diagnose(
+    db: Session, crop: Crop, current: SceneValues, previous: SceneValues
+) -> tuple[Diagnosis, SceneValues]:
+    reference = current.scene_date or date.today()
     result = diagnose(
         species=crop.species,
         scene_date=reference,
@@ -171,13 +214,57 @@ def archive_diagnosis(
     return record
 
 
-def archive_for_parcel(db: Session, parcel_id: int) -> int:
+def interpret_crop(
+    db: Session, crop: Crop, today: date | None = None
+) -> tuple[int, bool]:
     """
-    Diagnostique et archive toutes les cultures EN COURS d'une parcelle.
-    Appelé après chaque analyse satellite.
+    Interprète les analyses des INTERPRETATION_WINDOW_DAYS derniers jours
+    qui ne l'ont pas encore été pour cette culture, de la plus ancienne à
+    la plus récente, et fait évoluer son alerte à chaque date.
+
+    La date la plus récente est toujours réinterprétée : elle a pu être
+    enregistrée par la consultation du diagnostic, avant que l'alerte ne
+    soit mise à jour. Le traitement des alertes étant idempotent, une date
+    déjà prise en compte ne change rien.
 
     Returns:
-        Nombre de diagnostics archivés.
+        (nombre d'interprétations enregistrées, une alerte a-t-elle changé)
+    """
+    today = today or date.today()
+    since = today - timedelta(days=INTERPRETATION_WINDOW_DAYS)
+    if crop.planting_date and crop.planting_date > since:
+        since = crop.planting_date
+
+    dates = analysis_dates(db, crop.parcel_id, since)
+    if not dates:
+        return 0, False
+
+    done = {
+        d for (d,) in db.query(CropDiagnosis.scene_date)
+        .filter(CropDiagnosis.crop_id == crop.id, CropDiagnosis.scene_date >= since)
+        .all()
+    }
+    latest = dates[-1]
+
+    archived, changed = 0, False
+    for scene_date in dates:
+        if scene_date in done and scene_date != latest:
+            continue
+        result, scene = run_diagnosis_at(db, crop, scene_date)
+        if archive_diagnosis(db, crop, result, scene):
+            archived += 1
+        if sync_alert(db, crop, result, scene):
+            changed = True
+    return archived, changed
+
+
+def archive_for_parcel(db: Session, parcel_id: int) -> int:
+    """
+    Interprète les analyses de toutes les cultures EN COURS d'une parcelle
+    et fait évoluer leurs alertes. Appelé après chaque analyse satellite.
+
+    Returns:
+        Nombre d'interprétations enregistrées.
     """
     crops = (
         db.query(Crop)
@@ -186,17 +273,22 @@ def archive_for_parcel(db: Session, parcel_id: int) -> int:
     )
 
     archived = 0
+    alerts_changed = False
     for crop in crops:
         try:
-            result, scene = run_diagnosis(db, crop)
-            if archive_diagnosis(db, crop, result, scene):
-                archived += 1
-                logger.info(
-                    "[suivi] Culture %s (%s) : %s, gravité %s",
-                    crop.id, crop.species, result.stage_label, result.severity,
-                )
+            count, changed = interpret_crop(db, crop)
+            archived += count
+            alerts_changed = alerts_changed or changed
+            if count:
+                logger.info("[suivi] Culture %s (%s) : %s analyse(s) interprétée(s)", crop.id, crop.species, count)
         except Exception:
             db.rollback()
-            logger.exception("[suivi] Diagnostic impossible pour la culture %s", crop.id)
+            logger.exception("[suivi] Interprétation impossible pour la culture %s", crop.id)
+
+    # Prévient les pages ouvertes : la cloche et l'historique se mettent à jour
+    if alerts_changed:
+        from app.services.events import publish_parcel_event
+
+        publish_parcel_event(parcel_id, "alerts")
 
     return archived

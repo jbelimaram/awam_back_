@@ -75,7 +75,7 @@ async def create_activity(
 ):
     _get_owned_parcel(payload.parcel_id, user, db)
 
-    employees = db.query(Employee).filter(Employee.id.in_(payload.employee_ids)).all()
+    employees = db.query(Employee).filter(Employee.id.in_(payload.employee_ids), Employee.user_id == user.id).all()
     if len(employees) != len(set(payload.employee_ids)):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -113,7 +113,7 @@ async def update_activity(
         setattr(activity, field, value)
 
     if payload.employee_ids is not None:
-        employees = db.query(Employee).filter(Employee.id.in_(payload.employee_ids)).all()
+        employees = db.query(Employee).filter(Employee.id.in_(payload.employee_ids), Employee.user_id == user.id).all()
         if len(employees) != len(set(payload.employee_ids)):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
