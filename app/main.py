@@ -144,7 +144,8 @@ app.include_router(diagnosis_router, prefix="/api")
 print("🔵 Ajout du router events...")
 app.include_router(events_router, prefix="/api")
 
-app.include_router(events_router, prefix="/api")
+print("🔵 ajout du router tasks...")
+app.include_router(task_types_router, prefix="/api")
 
 # ==================================================================
 # Titiler

@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.core.security import get_current_user
 from app.db.database import get_db
-from app.models.activity import Activity
+from app.models.activity import DONE_STATUSES, Activity
 from app.models.crop import Crop
 from app.models.crop_observation import CropObservation
 from app.models.farm import Farm
@@ -91,9 +91,14 @@ def _get_owned_crop(crop_id: int, user: User, db: Session) -> Crop:
 
 def _last_harvest_activity(crop: Crop, db: Session) -> Optional[date]:
     """Date de la dernière activité de type récolte ou coupe, ou None."""
+    # Seules les tâches FAITES comptent : une récolte planifiée n'a pas eu lieu
     activities = (
         db.query(Activity)
-        .filter(Activity.crop_id == crop.id)
+        .filter(
+            Activity.crop_id == crop.id,
+            Activity.status.in_(DONE_STATUSES),
+            Activity.performed_at.isnot(None),
+        )
         .order_by(Activity.performed_at.desc())
         .all()
     )

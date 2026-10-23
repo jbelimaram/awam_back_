@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.core.security import get_current_user
 from app.db.database import get_db
 from app.models.employee import Employee
+from app.models.farm_employee import FarmEmployee
 from app.models.utilisateur import User
 from app.schemas.employee import EmployeeCreate, EmployeeResponse, EmployeeUpdate
 
@@ -81,6 +82,15 @@ async def update_employee(
     update_data = payload.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(employee, field, value)
+
+    # Employé rendu inactif, dans toutes ses fermes : il quitte ses équipes
+    # et perd son rôle de coordinateur (la ferme en désignera un autre).
+    # Son historique de tâches est conservé.
+    if update_data.get("is_active") is False:
+        for link in db.query(FarmEmployee).filter(FarmEmployee.employee_id == employee.id).all():
+            link.team = None
+            if link.role == "coordinateur":
+                link.role = "membre"
 
     db.commit()
     db.refresh(employee)

@@ -21,6 +21,7 @@ from app.models.farm_employee import FarmEmployee
 from app.models.employee import Employee
 from app.services.task_types import is_valid_code
 from app.schemas.farm_employee import (
+    TeamAssignment,
     FarmEmployeeCreate,
     FarmEmployeeUpdate,
     FarmEmployeeResponse,
@@ -103,6 +104,52 @@ async def add_farm_employee(
     return link
 
 
+@router.post("/{farm_id}/employees/assign-team", response_model=List[FarmEmployeeResponse])
+async def assign_team(
+    farm_id: int,
+    payload: TeamAssignment,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Place plusieurs employés de la ferme dans une équipe en une seule fois
+    (ou les retire de leur équipe si `team` est vide). Un employé qui était
+    dans une autre équipe la quitte automatiquement : une seule équipe par
+    employé et par ferme. Renvoie tous les employés de la ferme, à jour.
+    """
+    _get_owned_farm(farm_id, user, db)
+    if payload.team and not is_valid_code(db, user.id, payload.team):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Équipe inconnue.")
+
+    links = (
+        db.query(FarmEmployee)
+        .filter(FarmEmployee.farm_id == farm_id, FarmEmployee.id.in_(payload.link_ids))
+        .all()
+    )
+    if len(links) != len(payload.link_ids):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Un ou plusieurs employés sont introuvables dans cette ferme.")
+
+    # Un employé inactif ne rejoint aucune équipe
+    if payload.team:
+        inactive = [l.employee.full_name for l in links if not l.employee.is_active]
+        if inactive:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Employé inactif : {', '.join(inactive)}. Réactivez-le avant de l'affecter à une équipe.",
+            )
+
+    for link in links:
+        link.team = payload.team or None
+    db.commit()
+
+    return (
+        db.query(FarmEmployee)
+        .filter(FarmEmployee.farm_id == farm_id)
+        .order_by(FarmEmployee.hired_at)
+        .all()
+    )
+
+
 @router.put("/{farm_id}/employees/{link_id}", response_model=FarmEmployeeResponse)
 async def update_farm_employee(
     farm_id: int,
@@ -122,6 +169,12 @@ async def update_farm_employee(
     if update_data.get("team"):
         if not is_valid_code(db, user.id, update_data["team"]):
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Équipe inconnue.")
+    # Un employé inactif ne rejoint aucune équipe et n'est pas coordinateur
+    if not link.employee.is_active and (update_data.get("team") or update_data.get("role") == "coordinateur"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Employé inactif : réactivez-le d'abord.",
+        )
     for field, value in update_data.items():
         setattr(link, field, value)
 

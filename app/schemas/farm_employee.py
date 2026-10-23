@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 from pydantic import BaseModel, field_validator
 
 from app.schemas.employee import EmployeeResponse
@@ -49,3 +49,19 @@ class FarmEmployeeResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class TeamAssignment(BaseModel):
+    """Place plusieurs employés d'une ferme dans une équipe, ou les en retire."""
+
+    #: Code du type de tâche de l'équipe ; null = retirer de leur équipe
+    team: Optional[str] = None
+    #: Rattachements employé-ferme concernés (au moins un)
+    link_ids: List[int]
+
+    @field_validator("link_ids")
+    @classmethod
+    def at_least_one(cls, v: List[int]) -> List[int]:
+        if not v:
+            raise ValueError("Choisissez au moins un employé.")
+        return list(dict.fromkeys(v))

@@ -5,9 +5,8 @@
 -- modèle (app/models/) est noté ici, avec sa date et sa raison, et envoyé
 -- sur GitHub avec le code.
 --
--- À EXÉCUTER EN ENTIER sur la base de CHAQUE machine, après chaque
--- récupération du code. Il peut être relancé sans risque : grâce à
--- IF NOT EXISTS, ce qui existe déjà est ignoré.
+-- Ce fichier peut être relancé sans risque : grâce à IF NOT EXISTS, les
+-- colonnes déjà présentes sont ignorées.
 -- =====================================================================
 
 
@@ -25,7 +24,6 @@ ALTER TABLE crop ADD COLUMN IF NOT EXISTS yield_unit VARCHAR(10);
 -- ---------------------------------------------------------------------
 ALTER TABLE crop ADD COLUMN IF NOT EXISTS end_date DATE;
 
-
 -- ---------------------------------------------------------------------
 -- 2026-10-21 · Alertes : épisode d'anomalie d'une culture
 -- Modèle : app/models/alert.py
@@ -42,7 +40,6 @@ ALTER TABLE alert ADD COLUMN IF NOT EXISTS resolution VARCHAR(20);
 ALTER TABLE alert ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMP WITH TIME ZONE;
 ALTER TABLE alert ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT now();
 
-
 -- ---------------------------------------------------------------------
 -- 2026-10-22 · Employés : chaque employé appartient à un compte
 -- Modèle : app/models/employee.py
@@ -57,10 +54,9 @@ FROM farm_employee fe
 JOIN farm f ON f.id = fe.farm_id
 WHERE fe.employee_id = e.id AND e.user_id IS NULL;
 
--- Employés sans aucune ferme : rattachés au compte ci-dessous
--- ⚠ Remplacer TON_EMAIL par l'adresse de ton compte AWAM avant d'exécuter
+-- Employés sans aucune ferme : rattachés à ton compte
 UPDATE employee
-SET user_id = (SELECT id FROM utilisateur WHERE email = 'TON_EMAIL')
+SET user_id = (SELECT id FROM utilisateur WHERE email = 'yasmine4klai48@gmail.com')
 WHERE user_id IS NULL;
 
 -- ---------------------------------------------------------------------
@@ -78,3 +74,21 @@ CREATE TABLE IF NOT EXISTS task_type (
     CONSTRAINT uq_task_type_user_name UNIQUE (user_id, name)
 );
 CREATE INDEX IF NOT EXISTS ix_task_type_user_id ON task_type (user_id);
+
+-- ---------------------------------------------------------------------
+-- 2026-10-23 · Employé inactif, dans toutes ses fermes
+-- Modèle : app/models/employee.py
+-- ---------------------------------------------------------------------
+ALTER TABLE employee ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;
+
+-- ---------------------------------------------------------------------
+-- 2026-10-23 · Planification : état, date prévue, équipe et tâches attachées
+-- Modèle : app/models/activity.py
+-- ---------------------------------------------------------------------
+ALTER TABLE activity ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'realisee';
+ALTER TABLE activity ADD COLUMN IF NOT EXISTS planned_for DATE;
+ALTER TABLE activity ALTER COLUMN performed_at DROP NOT NULL;
+ALTER TABLE activity ALTER COLUMN performed_at DROP DEFAULT;
+ALTER TABLE activity ADD COLUMN IF NOT EXISTS team VARCHAR(60);
+ALTER TABLE activity ADD COLUMN IF NOT EXISTS parent_id INTEGER REFERENCES activity(id) ON DELETE CASCADE;
+CREATE INDEX IF NOT EXISTS ix_activity_parent_id ON activity (parent_id);
