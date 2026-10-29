@@ -28,8 +28,9 @@ from app.models.employee import Employee
 from app.models.farm import Farm
 from app.models.parcel import Parcel
 from app.models.utilisateur import User
-from app.schemas.activity import ActivityComplete, ActivityCreate, ActivityResponse, ActivityUpdate
-from app.services.task_types import is_valid_code
+from app.schemas.activity import ActivityComplete, ActivityCreate, ActivityResponse, ActivityUpdate, FarmHistoryItem
+from app.services.agronomy.species import SPECIES
+from app.services.task_types import canonical_code
 
 router = APIRouter(tags=["activities"])
 
@@ -88,9 +89,9 @@ def _check_crop(crop_id: Optional[int], parcel_id: int, db: Session) -> None:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Cette culture n'est pas sur la parcelle de la tâche.")
 
 
-def _check_team(team: Optional[str], user: User, db: Session) -> None:
-    if team and not is_valid_code(db, user.id, team):
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Équipe inconnue.")
+def _team_code(team: Optional[str], user: User, db: Session) -> Optional[str]:
+    """Équipe chargée : nom ramené à son écriture existante, ou aucune."""
+    return canonical_code(db, user.id, team) if team else None
 
 
 def _apply_status(activity: Activity) -> None:
@@ -158,9 +159,56 @@ async def list_parcel_planning(
     return (
         db.query(Activity)
         .filter(Activity.parcel_id == parcel_id, day >= start, day <= end)
-        .order_by(day, Activity.parent_id.nullsfirst(), Activity.id)
+        # Dans une journée : par heure prévue, les tâches sans heure en dernier
+        .order_by(day, Activity.planned_time.nullslast(), Activity.parent_id.nullsfirst(), Activity.id)
         .all()
     )
+
+
+@router.get("/farms/{farm_id}/history", response_model=List[FarmHistoryItem])
+async def list_farm_history(
+    farm_id: int,
+    days: Optional[int] = Query(
+        30,
+        ge=1,
+        le=3650,
+        description="Tâches faites des N derniers jours (7, 30, 90…). Omis ou vide = tout l'historique.",
+    ),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Historique des opérations d'une ferme : les tâches FAITES (réalisées ou
+    à entretenir) de toutes ses parcelles, les plus récentes d'abord, avec
+    leurs employés, leur parcelle et leur culture. Les filtres par employé,
+    équipe ou type se font à l'affichage.
+    """
+    farm = db.query(Farm).filter(Farm.id == farm_id, Farm.user_id == user.id).first()
+    if not farm:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ferme introuvable.")
+
+    query = (
+        db.query(Activity)
+        .join(Parcel, Activity.parcel_id == Parcel.id)
+        .filter(Parcel.farm_id == farm_id, Activity.status.in_(DONE_STATUSES))
+    )
+    if days is not None:
+        # Jours calendaires, comme l'historique d'une parcelle
+        start_of_today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        query = query.filter(Activity.performed_at >= start_of_today - timedelta(days=days - 1))
+
+    items: List[FarmHistoryItem] = []
+    for activity in query.order_by(Activity.performed_at.desc(), Activity.id.desc()).all():
+        crop = db.get(Crop, activity.crop_id) if activity.crop_id else None
+        spec = SPECIES.get(crop.species) if crop else None
+        items.append(
+            FarmHistoryItem(
+                **ActivityResponse.model_validate(activity).model_dump(),
+                parcel_name=activity.parcel.name,
+                crop_label=(spec.label if spec else crop.species) if crop else None,
+            )
+        )
+    return items
 
 
 @router.get("/employees/{employee_id}/tasks", response_model=List[ActivityResponse])
@@ -197,7 +245,6 @@ async def create_activity(
 ):
     _get_owned_parcel(payload.parcel_id, user, db)
     _check_crop(payload.crop_id, payload.parcel_id, db)
-    _check_team(payload.team, user, db)
 
     if payload.parent_id is not None:
         parent = _get_owned_activity(payload.parent_id, user, db)
@@ -209,12 +256,14 @@ async def create_activity(
 
     activity = Activity(
         parcel_id=payload.parcel_id,
-        activity_type=payload.activity_type,
+        # Type prédéfini, personnalisé existant, ou nouveau type personnalisé
+        activity_type=canonical_code(db, user.id, payload.activity_type),
         status=payload.status,
         planned_for=payload.planned_for,
+        planned_time=payload.planned_time,
         performed_at=payload.performed_at,
         crop_id=payload.crop_id,
-        team=payload.team or None,
+        team=_team_code(payload.team, user, db),
         parent_id=payload.parent_id,
     )
     activity.employees = employees
@@ -240,8 +289,9 @@ async def update_activity(
     if payload.parcel_id is not None:
         _get_owned_parcel(payload.parcel_id, user, db)
     if "team" in update_data:
-        _check_team(update_data["team"], user, db)
-        update_data["team"] = update_data["team"] or None
+        update_data["team"] = _team_code(update_data["team"], user, db)
+    if update_data.get("activity_type"):
+        update_data["activity_type"] = canonical_code(db, user.id, update_data["activity_type"])
 
     for field, value in update_data.items():
         setattr(activity, field, value)

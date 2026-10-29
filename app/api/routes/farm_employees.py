@@ -19,7 +19,7 @@ from app.models.utilisateur import User
 from app.models.farm import Farm
 from app.models.farm_employee import FarmEmployee
 from app.models.employee import Employee
-from app.services.task_types import is_valid_code
+from app.services.task_types import canonical_code
 from app.schemas.farm_employee import (
     TeamAssignment,
     FarmEmployeeCreate,
@@ -118,8 +118,8 @@ async def assign_team(
     employé et par ferme. Renvoie tous les employés de la ferme, à jour.
     """
     _get_owned_farm(farm_id, user, db)
-    if payload.team and not is_valid_code(db, user.id, payload.team):
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Équipe inconnue.")
+    # Nom d'équipe : prédéfini, personnalisé existant, ou nouveau
+    team = canonical_code(db, user.id, payload.team) if payload.team else None
 
     links = (
         db.query(FarmEmployee)
@@ -139,7 +139,7 @@ async def assign_team(
             )
 
     for link in links:
-        link.team = payload.team or None
+        link.team = team
     db.commit()
 
     return (
@@ -169,12 +169,9 @@ async def update_farm_employee(
     if update_data.get("team"):
         if not is_valid_code(db, user.id, update_data["team"]):
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Équipe inconnue.")
-    # Un employé inactif ne rejoint aucune équipe et n'est pas coordinateur
-    if not link.employee.is_active and (update_data.get("team") or update_data.get("role") == "coordinateur"):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Employé inactif : réactivez-le d'abord.",
-        )
+    # Équipe : nom ramené à son écriture existante, ou vide (sans équipe)
+    if "team" in update_data:
+        update_data["team"] = canonical_code(db, user.id, update_data["team"]) if update_data["team"] else None
     for field, value in update_data.items():
         setattr(link, field, value)
 
