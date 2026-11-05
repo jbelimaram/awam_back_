@@ -126,3 +126,36 @@ END $$;
 
 -- 2026-10-29 · Heure prévue des tâches (facultative)
 ALTER TABLE activity ADD COLUMN IF NOT EXISTS planned_time TIME;
+
+-- =====================================================================
+-- 2026-11-04 · Irrigation : arrosages
+-- Modèle : app/models/irrigation_watering.py
+-- Un arrosage est une tâche (activity) de type « irrigation » ; cette table
+-- garde ses détails d'eau : équipement, façon de mesurer, quantité. Une
+-- ligne par tâche, supprimée avec elle. Le bloc peut être relancé sans risque.
+-- =====================================================================
+CREATE TABLE IF NOT EXISTS irrigation_watering (
+    id               SERIAL PRIMARY KEY,
+    activity_id      INTEGER NOT NULL UNIQUE REFERENCES activity(id) ON DELETE CASCADE,
+    -- Équipement utilisé ; vide s'il a été supprimé depuis (le volume reste)
+    equipment_id     INTEGER REFERENCES irrigation_equipment(id) ON DELETE SET NULL,
+    -- arrosoirs | duree | compteur | volume
+    method           VARCHAR(20) NOT NULL,
+    can_count        INTEGER,
+    start_time       TIME,
+    end_time         TIME,
+    duration_min     DOUBLE PRECISION,
+    meter_volume_l   DOUBLE PRECISION,
+    -- Volume d'eau apporté (L), calculé à l'enregistrement
+    volume_l         DOUBLE PRECISION,
+    created_at       TIMESTAMP WITH TIME ZONE DEFAULT now(),
+    updated_at       TIMESTAMP WITH TIME ZONE DEFAULT now(),
+    CONSTRAINT ck_irrigation_watering_method CHECK (method IN ('arrosoirs', 'duree', 'compteur', 'volume')),
+    CONSTRAINT ck_irrigation_watering_positive CHECK (
+        (can_count IS NULL OR can_count > 0)
+        AND (duration_min IS NULL OR duration_min > 0)
+        AND (meter_volume_l IS NULL OR meter_volume_l > 0)
+        AND (volume_l IS NULL OR volume_l >= 0)
+    )
+);
+CREATE INDEX IF NOT EXISTS ix_irrigation_watering_equipment_id ON irrigation_watering (equipment_id);

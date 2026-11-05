@@ -37,7 +37,7 @@ from app.api.routes.auth import router as auth_router
 from app.api.routes.profile import router as profile_router
 from app.db.database import SessionLocal
 from app.models.utilisateur import User
-from sqlalchemy import func  # ⬅️ CASSE E-MAIL
+from sqlalchemy import func  
 
 from app.api.routes.parcels import router as parcels_router
 from app.api.routes.vector_layers import router as vector_layers_router
@@ -53,7 +53,7 @@ from app.api.routes.agenda import router as agenda_router
 from app.api.routes.indices import router as indices_router
 from app.api.routes.alerts import router as alerts_router
 from app.api.routes.employees import router as employees_router
-from app.api.routes.farm_employees import router as farm_employees_router  # ⬅️ AJOUT
+from app.api.routes.farm_employees import router as farm_employees_router  
 from app.api.routes.activities import router as activities_router
 from app.api.routes.weather import router as weather_router
 from app.api.routes.parcel_analyses import router as parcel_analyses_router
@@ -61,6 +61,9 @@ from app.api.routes.crops import router as crops_router
 from app.api.routes.diagnosis import router as diagnosis_router
 from app.api.routes.events import router as events_router
 from app.api.routes.task_types import router as task_types_router
+from app.api.routes.climate import router as climate_router
+from app.api.routes.irrigation import router as irrigation_router
+
 
 print("🔵 Lancement de l'application FastAPI...")
 
@@ -144,9 +147,12 @@ app.include_router(diagnosis_router, prefix="/api")
 print("🔵 Ajout du router events...")
 app.include_router(events_router, prefix="/api")
 
-print("🔵 ajout du router tasks...")
+print("🔵 Ajout du router task...")
 app.include_router(task_types_router, prefix="/api")
 
+print("🔵 Ajout du router climat...")
+
+app.include_router(climate_router, prefix="/api")
 # ==================================================================
 # Titiler
 # ==================================================================
@@ -164,6 +170,9 @@ app.include_router(
     tags=["COG"],
     dependencies=[Depends(get_current_user)],
 )
+
+print("🔵 Ajout d'irrigation task...")
+app.include_router(irrigation_router, prefix="/api")
 
 print("✅ Application prête !")
 
