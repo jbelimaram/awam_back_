@@ -313,3 +313,27 @@ async def irrigation_history(
         item["parcel_area_m2"] = round(area_ha * 10000, 1) if area_ha else None
         out.append(item)
     return out
+
+    
+
+# ======================================================================
+# Suivi : les cultures ont-elles reçu assez d'eau ?
+# ======================================================================
+
+from app.services import water_balance_service  # noqa: E402
+
+
+@router.get("/parcels/{parcel_id}/water-balance")
+async def water_balance(
+    parcel_id: int,
+    weeks: int = Query(8, ge=1, le=52, description="Nombre de semaines du tableau"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Pour chaque culture en cours de la parcelle : le bilan d'eau des
+    7 derniers jours (besoin, pluie utile, irrigation, besoin couvert) et
+    celui des dernières semaines. Méthode : app/services/water_balance_service.py.
+    """
+    parcel = _own_parcel(db, parcel_id, user)
+    return water_balance_service.parcel_balance(db, parcel, weeks)

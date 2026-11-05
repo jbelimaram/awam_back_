@@ -84,7 +84,24 @@ def computed(equipment: IrrigationEquipment, area_ha: float | None) -> dict:
             out["total_flow_l_h"] = round(out["flow_per_plant_l_h"] * out["plants_per_ha"] * area_ha, 1)
     return out
 
+def active_crops(db: Session, parcel_id: int) -> list[Crop]:
+    return db.query(Crop).filter(Crop.parcel_id == parcel_id, Crop.status == "active").all()
 
+
+def crop_area_m2(db: Session, parcel: Parcel, crop: Crop | None) -> float | None:
+    """
+    Surface sur laquelle compter l'eau d'une culture, pour le Suivi (m²) :
+      - si la parcelle n'a qu'une culture en cours, la surface de la parcelle ;
+      - sinon None : la culture partage la parcelle et AWAM ne connaît pas
+        encore sa surface, les calculs ne seraient pas fiables.
+    """
+    crops = active_crops(db, parcel.id)
+    if crop is None or len(crops) <= 1:
+        area_ha = parcel_area_ha(db, parcel)
+        return round(area_ha * 10000, 1) if area_ha else None
+    return None
+
+    
 def crop_labels(db: Session, crop_ids: list[int]) -> list[dict]:
     """Nom lisible des cultures desservies : l'espèce, et sa variété si elle est connue."""
     if not crop_ids:
