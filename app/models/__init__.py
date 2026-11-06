@@ -16,10 +16,10 @@ from app.models.weather_daily import *
 from app.models.climate import *
 from app.models.irrigation_equipment import *
 from app.models.irrigation_watering import IrrigationWatering
-
+from app.models.weather_forecast import *
 __all__ = [
     "User", "Farm", "Parcel", "Activity",
     "Employee", "Alert", "IndiceReading", "IrrigationEquipment",
     "IrrigationWatering",
-    "Raster", "SpatialReference", "Crop", "CropObservation", "CropDiagnosis", "ClimateSite", "ClimateMonthly",
+    "Raster", "SpatialReference", "Crop", "CropObservation", "CropDiagnosis", "ClimateSite", "ClimateMonthly", "WeatherForecast",
 ]

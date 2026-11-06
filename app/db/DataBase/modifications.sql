@@ -159,3 +159,31 @@ CREATE TABLE IF NOT EXISTS irrigation_watering (
     )
 );
 CREATE INDEX IF NOT EXISTS ix_irrigation_watering_equipment_id ON irrigation_watering (equipment_id);
+-- =====================================================================
+-- 2026-11-06 · Climat et cultures · Étape 1 : les données
+--   1. weather_daily : 3 paramètres de plus, chaque jour depuis 2020 ;
+--   2. weather_forecast : les prévisions des prochains jours, à part,
+--      pour ne jamais mélanger des jours futurs avec le climat réel.
+-- Le bloc peut être relancé sans risque.
+-- =====================================================================
+ALTER TABLE weather_daily ADD COLUMN IF NOT EXISTS temperature_mean_c DOUBLE PRECISION;
+ALTER TABLE weather_daily ADD COLUMN IF NOT EXISTS humidity_mean_pct DOUBLE PRECISION;
+ALTER TABLE weather_daily ADD COLUMN IF NOT EXISTS wind_speed_mean_kmh DOUBLE PRECISION;
+
+CREATE TABLE IF NOT EXISTS weather_forecast (
+    id                  SERIAL PRIMARY KEY,
+    farm_id             INTEGER NOT NULL REFERENCES farm(id) ON DELETE CASCADE,
+    day                 DATE NOT NULL,
+    temperature_min_c   DOUBLE PRECISION,
+    temperature_max_c   DOUBLE PRECISION,
+    temperature_mean_c  DOUBLE PRECISION,
+    precipitation_mm    DOUBLE PRECISION,
+    et0_mm              DOUBLE PRECISION,
+    wind_speed_max_kmh  DOUBLE PRECISION,
+    wind_speed_mean_kmh DOUBLE PRECISION,
+    humidity_mean_pct   DOUBLE PRECISION,
+    radiation_mj_m2     DOUBLE PRECISION,
+    fetched_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT uq_weather_forecast_farm_day UNIQUE (farm_id, day)
+);
+CREATE INDEX IF NOT EXISTS ix_weather_forecast_farm ON weather_forecast (farm_id);

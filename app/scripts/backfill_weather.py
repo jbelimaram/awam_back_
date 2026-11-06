@@ -21,7 +21,8 @@ from app.services.weather_history_service import sync_all_farms
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
-DEFAULT_START = date(2026, 1, 1)
+#: Depuis 2020 : les normales du climat (2020-2025) de la page Climat et cultures
+DEFAULT_START = date(2020, 1, 1)
 
 
 def main() -> int:
