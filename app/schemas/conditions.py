@@ -35,3 +35,25 @@ class MonthConditions(BaseModel):
     longest_dry_spell: Optional[int] = None
     wind_speed_max_kmh: Optional[float] = None
     windiest_day: Optional[date] = None
+    
+
+class YearRow(BaseModel):
+    """Un mois d'une année, dans la comparaison des années."""
+
+    year: int
+    days: int
+    #: Mois incomplet (mois en cours, ou jours manquants)
+    partial: bool
+    values: dict[str, Optional[float]]
+
+
+class YearComparison(BaseModel):
+    """Le même mois pour chaque année, et sa normale."""
+
+    farm_id: int
+    #: Numéro du mois, de 1 à 12
+    month: int
+    normals_period: list[int]
+    #: De l'année la plus récente à la plus ancienne
+    years: list[YearRow]
+    normal: dict[str, Optional[float]]

@@ -31,5 +31,8 @@ DRY_DAY_MM = _float("CONDITIONS_DRY_DAY_MM", 1.0)
 #: Un mois compte pour la normale s'il lui manque au plus ce nombre de jours
 MAX_MISSING_DAYS = _int("CONDITIONS_MAX_MISSING_DAYS", 3)
 
+#: Premier mois de la saison, pour le cumul de l'eau de l'onglet Impacts :
+#: septembre, début de la campagne agricole en Tunisie (de septembre à août)
+SEASON_START_MONTH = _int("CONDITIONS_SEASON_START_MONTH", 9)
 if NORMALS_START > NORMALS_END:
     raise ValueError("CONDITIONS_NORMALS_START doit précéder CONDITIONS_NORMALS_END")

@@ -206,3 +206,35 @@ def month_conditions(db: Session, farm_id: int, year: int, month: int, today: da
         "wind_speed_max_kmh": _round(values["wind_speed_max_kmh"]),
         "windiest_day": values["windiest_day"],
     }
+    
+
+def compare_years(db: Session, farm_id: int, month: int, today: date | None = None) -> dict:
+    """
+    Le même mois pour chaque année, depuis le début des normales jusqu'à
+    aujourd'hui, et sa normale : pour comparer les années entre elles.
+    Le mois de l'année en cours peut être partiel : il est signalé.
+    """
+    today = today or date.today()
+    rows_out = []
+    for y in range(today.year, cfg.NORMALS_START - 1, -1):
+        start, end = _month_bounds(y, month)
+        if start > today:
+            continue
+        rows = daily_rows(db, farm_id, start, min(end, today))
+        if not rows:
+            continue
+        values = month_values(rows)
+        rows_out.append({
+            "year": y,
+            "days": len(rows),
+            "partial": end >= today or len(rows) < end.day - cfg.MAX_MISSING_DAYS,
+            "values": {key: _round(values[key]) for key in PARAMETERS},
+        })
+    ref = normal(db, farm_id, month)
+    return {
+        "farm_id": farm_id,
+        "month": month,
+        "normals_period": [cfg.NORMALS_START, cfg.NORMALS_END],
+        "years": rows_out,
+        "normal": {key: _round(ref[key]) for key in PARAMETERS},
+    }
