@@ -27,7 +27,6 @@ class EquipmentFields(BaseModel):
     emitters_per_plant: Optional[int] = Field(None, gt=0, le=100)
     plant_spacing_m: Optional[float] = Field(None, gt=0, le=100)
     row_spacing_m: Optional[float] = Field(None, gt=0, le=100)
-    efficiency_pct: Optional[float] = Field(None, gt=0, le=100)
     active: Optional[bool] = None
     notes: Optional[str] = Field(None, max_length=2000)
 
@@ -66,7 +65,6 @@ class EquipmentResponse(BaseModel):
     emitters_per_plant: Optional[int] = None
     plant_spacing_m: Optional[float] = None
     row_spacing_m: Optional[float] = None
-    efficiency_pct: Optional[float] = None
     active: bool
     notes: Optional[str] = None
 
