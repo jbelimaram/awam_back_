@@ -47,6 +47,10 @@ ALERT_LEVELS = ("alert", "strong_alert")
 SEVERITY_LABELS = {
     "strong_alert": "Anomalie persistante",
     "alert": "Anomalie détectée",
+    # Alertes d'eau (water_alert_service) : un constat, sans gravité
+    "besoin_non_couvert": "Besoin non couvert",
+    # Surveillance de la parcelle (vegetation_alert_service)
+    "anomalie_vegetation": "Anomalie de végétation",
     "watch": "À surveiller",
     "normal": "Normal",
 }

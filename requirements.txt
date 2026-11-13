@@ -54,3 +54,4 @@ shapely
 
 planetary-computer
 pystac-client
+reportlab==5.1.0
