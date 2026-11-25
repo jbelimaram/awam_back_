@@ -50,10 +50,30 @@ if REDIS_URL.startswith("rediss://"):
 # d'attendre la prochaine tâche planifiée pour s'en apercevoir)
 # ------------------------------------------------------------------
 celery_app.conf.broker_connection_retry_on_startup = True
+# Après une coupure, le worker réessaie SANS LIMITE (par défaut, il
+# abandonnait après 100 tentatives, environ 50 minutes, et s'arrêtait)
+celery_app.conf.broker_connection_max_retries = None
 celery_app.conf.broker_transport_options = {
     "socket_keepalive": True,
     "retry_policy": {"timeout": 5.0},
+    # Connexion vérifiée régulièrement (en secondes) : une connexion
+    # fermée par Upstash pendant l'inactivité est refaite avant usage
+    "health_check_interval": 30,
+    "socket_connect_timeout": 10,
+    "retry_on_timeout": True,
 }
+# Mêmes protections pour la connexion des résultats (réglages Celery dédiés)
+celery_app.conf.redis_socket_keepalive = True
+celery_app.conf.redis_backend_health_check_interval = 30
+celery_app.conf.redis_socket_connect_timeout = 10
+celery_app.conf.redis_retry_on_timeout = True
+
+# AWAM ne lit jamais le résultat d'une tâche (même la chaîne de
+# l'historique, en signatures immuables « .si », n'en a pas besoin).
+# Sans cela, chaque envoi s'abonnait à son résultat dans Redis : pendant
+# une coupure, chaque envoi bloquait environ 19 secondes, et l'abonnement
+# pouvait épuiser ses tentatives (« must be restarted »).
+celery_app.conf.task_ignore_result = True
 
 # ------------------------------------------------------------------
 # Timezone
